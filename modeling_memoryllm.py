@@ -306,7 +306,12 @@ class LlamaAttention(nn.Module):
                     base=self.rope_theta,
                 )
             else:
-                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
+                # "default" or unknown type — use standard RoPE
+                self.rotary_emb = LlamaRotaryEmbedding(
+                    self.head_dim,
+                    max_position_embeddings=self.max_position_embeddings,
+                    base=self.rope_theta,
+                )
 
     def forward(
         self,
