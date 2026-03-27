@@ -36,39 +36,70 @@ wget https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v2.0.json -P data/
 ```
 
 ### 4. Run experiments
+
+The script supports two modes: initializing MemoryLLM from a **base LLM** (fresh memory, for training/profiling) or loading a **pretrained MemoryLLM checkpoint** (for evaluation).
+
+#### Option A: Base 3B model (fresh memory pool — use this for compute profiling)
 ```bash
-# Smoke test (no datasets needed, validates strategies work)
-python test_training_colab.py --model YuWangX/memoryllm-8b --smoke-test
+# Smoke test with OpenLlama 3B (no datasets needed, no gated access)
+python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 --smoke-test
+
+# Smoke test with Llama 3.2 3B (requires HF login + license acceptance)
+python test_training_colab.py --base-model meta-llama/Llama-3.2-3B --smoke-test
 
 # GPU memory profiling only
-python test_training_colab.py --model YuWangX/memoryllm-8b --profile-only
+python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 --profile-only
 
-# Full strategy comparison on SQuAD with 5 interference steps
-python test_training_colab.py --model YuWangX/memoryllm-8b \
+# Adjust memory pool size (default: 4 blocks x 256 tokens)
+python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 \
+    --num-blocks 10 --num-tokens 256 --smoke-test
+
+# Full strategy comparison on SQuAD
+python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 \
     --strategies random attention age surprise \
     --datasets squad --nuc 5 --num-samples 50
+```
+
+#### Option B: Pretrained MemoryLLM-8B checkpoint (for evaluating strategies on a trained model)
+```bash
+# Smoke test with pretrained 8B
+python test_training_colab.py --pretrained YuWangX/memoryllm-8b --smoke-test
 
 # Full comparison on both datasets
-python test_training_colab.py --model YuWangX/memoryllm-8b \
+python test_training_colab.py --pretrained YuWangX/memoryllm-8b \
     --strategies random attention age surprise \
     --datasets squad naturalqa --nuc 10 --num-samples 100
 ```
 
+> **Note:** With `--base-model` and a fresh (untrained) memory pool, QA accuracy will be near zero — the model hasn't learned to use its memory yet. Use this mode for compute/memory profiling. For meaningful accuracy numbers, use `--pretrained` with a trained checkpoint.
+
 ### 5. Using strategies in your own code
 ```python
+import torch
 from modeling_memoryllm_strategies import MemoryLLMWithStrategies
 from transformers import AutoTokenizer
 
-model = MemoryLLMWithStrategies.from_pretrained("YuWangX/memoryllm-8b", torch_dtype=torch.bfloat16)
-tokenizer = AutoTokenizer.from_pretrained("YuWangX/memoryllm-8b")
+# Option A: From a base model (fresh memory)
+from test_training_colab import load_model_from_base
+model, tokenizer = load_model_from_base(
+    "openlm-research/open_llama_3b_v2",
+    num_blocks=4, num_tokens=256)
 model = model.cuda()
+
+# Option B: From pretrained checkpoint
+# model = MemoryLLMWithStrategies.from_pretrained(
+#     "YuWangX/memoryllm-8b", torch_dtype=torch.bfloat16)
+# tokenizer = AutoTokenizer.from_pretrained("YuWangX/memoryllm-8b")
+# model = model.cuda()
 
 # Switch strategy (options: random, attention, age, surprise, fisher)
 model.set_drop_strategy("attention")
 
 # Use exactly like MemoryLLM — inject_memory and generate work the same way
 ctx = "The capital of France is Paris."
-model.inject_memory(tokenizer(ctx, return_tensors='pt', add_special_tokens=False).input_ids.cuda(), update_memory=True)
+model.inject_memory(
+    tokenizer(ctx, return_tensors='pt', add_special_tokens=False).input_ids.cuda(),
+    update_memory=True)
 ```
 
 ### Available Strategies
