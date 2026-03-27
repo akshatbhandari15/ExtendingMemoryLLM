@@ -957,7 +957,8 @@ class LlamaModel(LlamaPreTrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
+            if hasattr(next_cache, 'to_legacy_cache'):
+                next_cache = next_cache.to_legacy_cache()
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
@@ -1972,7 +1973,8 @@ class MemoryLLM(LlamaForCausalLM):
 
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
+            if hasattr(next_cache, 'to_legacy_cache'):
+                next_cache = next_cache.to_legacy_cache()
 
         if output_delta_memory:
 
