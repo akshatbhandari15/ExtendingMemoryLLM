@@ -281,8 +281,16 @@ class LlamaAttention(nn.Module):
                 base=self.rope_theta,
             )
         else:
-            scaling_type = self.config.rope_scaling["type"]
-            scaling_factor = self.config.rope_scaling["factor"]
+            scaling_type = self.config.rope_scaling.get("type", None) or self.config.rope_scaling.get("rope_type", None)
+            scaling_factor = self.config.rope_scaling.get("factor", 1.0)
+            if scaling_type is None:
+                # Unrecognized rope_scaling format — fall back to default
+                self.rotary_emb = LlamaRotaryEmbedding(
+                    self.head_dim,
+                    max_position_embeddings=self.max_position_embeddings,
+                    base=self.rope_theta,
+                )
+                return
             if scaling_type == "linear":
                 self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
                     self.head_dim,

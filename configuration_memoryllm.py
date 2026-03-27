@@ -194,15 +194,33 @@ class MemoryLLMConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling, dict) or len(self.rope_scaling) != 2:
-            raise ValueError(
-                "`rope_scaling` must be a dictionary with two fields, `type` and `factor`, " f"got {self.rope_scaling}"
-            )
+        if not isinstance(self.rope_scaling, dict):
+            return
+
+        # Normalize: newer configs use "rope_type" instead of "type"
+        if "rope_type" in self.rope_scaling and "type" not in self.rope_scaling:
+            self.rope_scaling["type"] = self.rope_scaling.pop("rope_type")
+
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
-            raise ValueError(
-                f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
+
+        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic", "default"]:
+            # Unknown scaling type — disable scaling to avoid errors
+            import warnings
+            warnings.warn(
+                f"Unknown rope_scaling type '{rope_scaling_type}', disabling rope scaling."
             )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")
+            self.rope_scaling = None
+            return
+
+        if rope_scaling_type == "default":
+            # "default" means no scaling
+            self.rope_scaling = None
+            return
+
+        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, (int, float)) or rope_scaling_factor <= 1.0:
+            import warnings
+            warnings.warn(
+                f"Invalid rope_scaling factor {rope_scaling_factor}, disabling rope scaling."
+            )
+            self.rope_scaling = None
