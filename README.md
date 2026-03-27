@@ -1,4 +1,91 @@
-# MemoryLLM & M+
+# Beyond Random Forgetting: Importance-Aware Memory Management for MemoryLLM
+
+**COMS 6998 — Continual Learning and Memory Models, Columbia University**
+
+This fork extends [MemoryLLM](https://arxiv.org/abs/2402.04624) with importance-aware dropping strategies. Instead of evicting memory tokens at random, we compare four principled strategies: attention-based, age-stratified, surprise-gated, and Fisher-inspired dropping.
+
+## Quick Start: Running Strategy Experiments on Google Colab
+
+### 1. Setup
+```bash
+# Clone and install
+git clone https://github.com/wangyu-ustc/MemoryLLM.git
+cd MemoryLLM
+pip install -r requirements_infer_only.txt
+huggingface-cli login
+```
+
+### 2. Copy strategy files into the repo
+Place these two files in the MemoryLLM root directory:
+- `modeling_memoryllm_strategies.py` — extends MemoryLLM with four dropping strategies
+- `test_training_colab.py` — evaluation and profiling script
+
+### 3. Download evaluation data
+```bash
+mkdir -p data/squad data/nq
+
+# SQuAD v2.0
+wget https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json -P data/squad/
+wget https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v2.0.json -P data/squad/
+
+# NaturalQA: download from https://ai.google.com/research/NaturalQuestions/download
+# Place v1.0-simplified_nq-dev-all.jsonl in data/nq/
+
+# Index files (from HuggingFace dataset: YuWangX/KnowledgeRetention)
+# Place indices_squad_3.npy in data/squad/ and indices_nq_4.npy in data/nq/
+```
+
+### 4. Run experiments
+```bash
+# Smoke test (no datasets needed, validates strategies work)
+python test_training_colab.py --model YuWangX/memoryllm-8b --smoke-test
+
+# GPU memory profiling only
+python test_training_colab.py --model YuWangX/memoryllm-8b --profile-only
+
+# Full strategy comparison on SQuAD with 5 interference steps
+python test_training_colab.py --model YuWangX/memoryllm-8b \
+    --strategies random attention age surprise \
+    --datasets squad --nuc 5 --num-samples 50
+
+# Full comparison on both datasets
+python test_training_colab.py --model YuWangX/memoryllm-8b \
+    --strategies random attention age surprise \
+    --datasets squad naturalqa --nuc 10 --num-samples 100
+```
+
+### 5. Using strategies in your own code
+```python
+from modeling_memoryllm_strategies import MemoryLLMWithStrategies
+from transformers import AutoTokenizer
+
+model = MemoryLLMWithStrategies.from_pretrained("YuWangX/memoryllm-8b", torch_dtype=torch.bfloat16)
+tokenizer = AutoTokenizer.from_pretrained("YuWangX/memoryllm-8b")
+model = model.cuda()
+
+# Switch strategy (options: random, attention, age, surprise, fisher)
+model.set_drop_strategy("attention")
+
+# Use exactly like MemoryLLM — inject_memory and generate work the same way
+ctx = "The capital of France is Paris."
+model.inject_memory(tokenizer(ctx, return_tensors='pt', add_special_tokens=False).input_ids.cuda(), update_memory=True)
+```
+
+### Available Strategies
+
+| Strategy | What it drops | Signal |
+|----------|--------------|--------|
+| `random` | Uniform random (baseline) | None |
+| `attention` | Tokens with lowest accumulated attention (EMA) | Relevance |
+| `age` | Older tokens preferentially, protecting recent injections | Recency |
+| `surprise` | Tokens most similar to incoming knowledge (redundant) | Redundancy |
+| `fisher` | Tokens whose removal least affects output distribution | Output sensitivity |
+
+Results are saved to `results/strategy_comparison/comparison_results.json`.
+
+---
+
+## Original MemoryLLM & M+ README
 
 This is the official implementation of paper **MemoryLLM: Towards Self-Updatable Large Language Models** and **M+: Extending MemoryLLM with Scalable Long-Term Memory**.
 
