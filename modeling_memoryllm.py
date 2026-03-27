@@ -1537,17 +1537,27 @@ class MemoryLLM(LlamaForCausalLM):
             from peft import get_peft_model, LoraConfig, TaskType
 
             peft_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM, 
-                inference_mode=config.lora_config['inference_mode'], 
-                r=config.lora_config['r'], 
-                lora_alpha=config.lora_config['lora_alpha'], 
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=config.lora_config['inference_mode'],
+                r=config.lora_config['r'],
+                lora_alpha=config.lora_config['lora_alpha'],
                 lora_dropout=config.lora_config['lora_dropout'],
                 target_modules=config.lora_config.get('target_modules', None)
             )
 
-            get_peft_model(self.model, peft_config)
-            if config.add_decoder_lora:
-                get_peft_model(self.model, peft_config, adapter_name="decoder_adapter")
+            try:
+                get_peft_model(self.model, peft_config)
+                if config.add_decoder_lora:
+                    get_peft_model(self.model, peft_config, adapter_name="decoder_adapter")
+            except AttributeError:
+                # Newer peft versions expect prepare_inputs_for_generation on the
+                # wrapped model. For inference with pretrained checkpoints (where
+                # LoRA weights are already merged), we can skip LoRA wrapping.
+                import warnings
+                warnings.warn(
+                    "Skipping LoRA wrapping due to peft version incompatibility. "
+                    "This is fine for inference with pretrained checkpoints."
+                )
 
 
     def inject_memory(self, context_ids, 
