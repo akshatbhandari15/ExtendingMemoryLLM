@@ -272,6 +272,16 @@ def run_retention_eval(model, tokenizer, dataset_name,
     print(f"  Loaded {len(dataset)} samples for {dataset_name}")
     model.eval()
 
+    # Initialize memory from real text (not random noise)
+    warmup_texts = [
+        "The Earth orbits the Sun at an average distance of 93 million miles.",
+        "Water freezes at 32 degrees Fahrenheit or 0 degrees Celsius.",
+        "The human heart beats approximately 100,000 times per day.",
+        "Photosynthesis is the process by which plants convert sunlight into energy.",
+    ]
+    init_memory_from_contexts(model, tokenizer, warmup_texts)
+    print(f"  Memory initialized from {len(warmup_texts)} warmup contexts")
+
     step_preds = {
         f"step_{i}": [] for i in range(num_unrelated_contexts + 1)}
     all_targets = []
@@ -331,15 +341,47 @@ def manual_generate(model, tokenizer, input_ids, max_new_tokens=30):
     This bypasses potential issues with GenerationMixin + MemoryLLM interaction."""
     generated = input_ids.clone()
     with torch.no_grad():
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             outputs = model(input_ids=generated, use_cache=False)
             logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
             next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            # Stop on EOS
-            if next_token.item() == tokenizer.eos_token_id:
+            tok_id = next_token.item()
+            # Debug: print first few tokens
+            if step < 3:
+                tok_str = tokenizer.decode([tok_id])
+                print(f"    [gen step {step}] token_id={tok_id} -> '{tok_str}'")
+            # Stop on EOS or padding
+            if tok_id in (tokenizer.eos_token_id, tokenizer.pad_token_id):
+                if step == 0:
+                    print(f"    WARNING: model produced EOS/PAD on first token!")
                 break
             generated = torch.cat([generated, next_token], dim=1)
     return generated
+
+
+def init_memory_from_contexts(model, tokenizer, warmup_texts):
+    """Initialize memory pool from real text instead of random noise.
+    This fills the pool with actual hidden states so the model can function."""
+    model.initialized.fill_(0)  # Reset to uninitialized
+    # First injection with initialized=0 fills the entire memory pool
+    first = warmup_texts[0]
+    ctx_input = tokenizer(first, return_tensors="pt",
+                          add_special_tokens=False).to("cuda")
+    # When uninitialized, inject_memory doesn't prepend memory tokens
+    # so attention_mask matches just the input
+    model.inject_memory(ctx_input.input_ids,
+                        ctx_input.attention_mask,
+                        update_memory=True)
+    # Now initialized=1, inject remaining warmup contexts normally
+    for text in warmup_texts[1:]:
+        ctx_input = tokenizer(text, return_tensors="pt",
+                              add_special_tokens=False).to("cuda")
+        inj_mask = torch.cat([
+            torch.ones(1, model.num_tokens, device="cuda"),
+            ctx_input.attention_mask
+        ], dim=1)
+        model.inject_memory(ctx_input.input_ids, inj_mask,
+                            update_memory=True)
 
 
 def run_smoke_test(model, tokenizer, strategies):
@@ -347,14 +389,25 @@ def run_smoke_test(model, tokenizer, strategies):
     print("SMOKE TEST: Verify strategies with real QA examples")
     print("=" * 60)
 
-    # Real SQuAD-style examples
+    # Warmup contexts to fill memory with real hidden states
+    warmup_texts = [
+        "The Earth orbits the Sun at an average distance of 93 million miles.",
+        "Water freezes at 32 degrees Fahrenheit or 0 degrees Celsius.",
+        "The human heart beats approximately 100,000 times per day.",
+        "Photosynthesis is the process by which plants convert sunlight into energy.",
+    ]
+
+    # Real SQuAD-style QA examples
     qa_examples = [
         {
-            "contexts": [
-                "Nikola Tesla was a Serbian-American inventor and electrical engineer. "
-                "He is best known for his contributions to the design of the modern "
-                "alternating current (AC) electricity supply system. Tesla was born on "
-                "10 July 1856 in Smiljan, Austrian Empire (modern-day Croatia).",
+            "context": (
+                "Nikola Tesla was a Serbian-American inventor and electrical "
+                "engineer. He is best known for his contributions to the design "
+                "of the modern alternating current (AC) electricity supply system. "
+                "Tesla was born on 10 July 1856 in Smiljan, Austrian Empire "
+                "(modern-day Croatia)."
+            ),
+            "distractors": [
                 "The Amazon rainforest produces about 20 percent of the world's oxygen.",
                 "The Great Wall of China stretches over 13,000 miles across northern China.",
             ],
@@ -362,45 +415,70 @@ def run_smoke_test(model, tokenizer, strategies):
             "expected": "Smiljan",
         },
         {
-            "contexts": [
-                "Marie Curie was a Polish and naturalized-French physicist and chemist. "
-                "She was the first woman to win a Nobel Prize, the first person to win "
-                "the Nobel Prize twice, and the only person to win the Nobel Prize in "
-                "two scientific fields: physics in 1903 and chemistry in 1911.",
+            "context": (
+                "Marie Curie was a Polish and naturalized-French physicist and "
+                "chemist. She was the first woman to win a Nobel Prize, the first "
+                "person to win the Nobel Prize twice, and the only person to win "
+                "the Nobel Prize in two scientific fields: physics in 1903 and "
+                "chemistry in 1911."
+            ),
+            "distractors": [
                 "Mount Everest is 8,849 meters tall and located in the Himalayas.",
-                "The speed of light in vacuum is approximately 299,792 kilometers per second.",
+                "The speed of light in vacuum is approximately 299,792 km per second.",
             ],
             "query": "In what year did Marie Curie win the Nobel Prize in chemistry?",
             "expected": "1911",
         },
     ]
 
+    # -- First verify the base model can generate at all --
+    print("\n[Debug] Testing base model generation WITHOUT memory...")
+    model.initialized.fill_(0)  # Disable memory
+    test_prompt = "The capital of France is"
+    test_input = tokenizer(test_prompt, return_tensors="pt").to("cuda")
+    test_out = manual_generate(model, tokenizer, test_input.input_ids, max_new_tokens=10)
+    test_resp = tokenizer.decode(test_out[0][test_input.input_ids.shape[1]:],
+                                 skip_special_tokens=True).strip()
+    print(f"  Prompt: '{test_prompt}' -> '{test_resp}'")
+
     for strategy in strategies:
         print(f"\n--- Strategy: {strategy} ---")
         torch.cuda.reset_peak_memory_stats()
 
-        # Reset memory
-        model.memory.data = torch.randn_like(model.memory.data)
-        model.initialized.fill_(1)
         if hasattr(model, 'set_drop_strategy'):
             model.set_drop_strategy(strategy)
             model.reset_metadata()
 
+        # Initialize memory from real text (not random noise)
+        init_memory_from_contexts(model, tokenizer, warmup_texts)
+        print(f"  Memory initialized from {len(warmup_texts)} warmup contexts")
+
         for ex in qa_examples:
-            # Inject all contexts
-            for ctx in ex["contexts"]:
-                ctx_input = tokenizer(
-                    ctx, return_tensors="pt",
+            # Inject the relevant context
+            ctx_input = tokenizer(
+                ex["context"], return_tensors="pt",
+                add_special_tokens=False).to("cuda")
+            inj_mask = torch.cat([
+                torch.ones(1, model.num_tokens, device="cuda"),
+                ctx_input.attention_mask
+            ], dim=1)
+            model.inject_memory(
+                ctx_input.input_ids, inj_mask, update_memory=True)
+
+            # Inject distractors
+            for dist in ex["distractors"]:
+                d_input = tokenizer(
+                    dist, return_tensors="pt",
                     add_special_tokens=False).to("cuda")
-                inj_mask = torch.cat([
+                d_mask = torch.cat([
                     torch.ones(1, model.num_tokens, device="cuda"),
-                    ctx_input.attention_mask
+                    d_input.attention_mask
                 ], dim=1)
                 model.inject_memory(
-                    ctx_input.input_ids, inj_mask, update_memory=True)
+                    d_input.input_ids, d_mask, update_memory=True)
 
-            # Query with manual generation (bypass generate())
-            prompt = f"Answer the question based on context stored in memory.\nQuestion: {ex['query']}\nAnswer:"
+            # Query
+            prompt = f"Q: {ex['query']}\nA:"
             q_input = tokenizer(prompt, return_tensors="pt").to("cuda")
 
             output = manual_generate(model, tokenizer, q_input.input_ids,
@@ -411,7 +489,7 @@ def run_smoke_test(model, tokenizer, strategies):
 
             contains_answer = ex["expected"].lower() in response.lower()
             print(f"  Q: {ex['query']}")
-            print(f"  A: {response[:120]}")
+            print(f"  A: {response[:150]}")
             print(f"  Expected: {ex['expected']} | Found: {contains_answer}")
 
         print_gpu_stats(f"After {strategy}")
@@ -419,6 +497,104 @@ def run_smoke_test(model, tokenizer, strategies):
             print(f"  Info: {model.get_strategy_info()}")
 
     print("\n  Smoke test PASSED for all strategies")
+
+
+# =========================================================================
+# Mini retention curve (toy, 5-step, built-in)
+# =========================================================================
+
+def run_mini_retention(model, tokenizer, strategies):
+    """Run a tiny retention experiment inline — no external dataset needed.
+    Inject a target fact, then inject N distractors, query after each step."""
+    print("\n" + "=" * 60)
+    print("MINI RETENTION CURVE (5 distractor steps)")
+    print("=" * 60)
+
+    target_context = (
+        "Professor James Henderson discovered a new species of deep-sea "
+        "jellyfish called Aurelia profunda in the Mariana Trench in 2019."
+    )
+    query_prompt = "Q: What species did Professor James Henderson discover?\nA:"
+    expected = "aurelia profunda"
+
+    distractors = [
+        "The Nile River is approximately 6,650 kilometers long and flows through northeastern Africa.",
+        "Ludwig van Beethoven composed his Ninth Symphony in 1824 while almost completely deaf.",
+        "The mitochondria is often called the powerhouse of the cell because it generates most of the cell's ATP.",
+        "Jupiter is the largest planet in our solar system with a mass of 1.898 times 10 to the 27 kilograms.",
+        "The Treaty of Westphalia in 1648 ended the Thirty Years War in the Holy Roman Empire.",
+    ]
+
+    warmup_texts = [
+        "The Earth orbits the Sun at an average distance of 93 million miles.",
+        "Water freezes at 32 degrees Fahrenheit or 0 degrees Celsius.",
+        "The human heart beats approximately 100,000 times per day.",
+        "Photosynthesis is the process by which plants convert sunlight into energy.",
+    ]
+
+    results = {}
+
+    for strategy in strategies:
+        print(f"\n--- Strategy: {strategy} ---")
+        if hasattr(model, 'set_drop_strategy'):
+            model.set_drop_strategy(strategy)
+            model.reset_metadata()
+
+        # Fresh memory from warmup
+        init_memory_from_contexts(model, tokenizer, warmup_texts)
+
+        # Inject target fact
+        ctx_input = tokenizer(target_context, return_tensors="pt",
+                              add_special_tokens=False).to("cuda")
+        inj_mask = torch.cat([
+            torch.ones(1, model.num_tokens, device="cuda"),
+            ctx_input.attention_mask
+        ], dim=1)
+        model.inject_memory(ctx_input.input_ids, inj_mask, update_memory=True)
+
+        step_responses = []
+
+        # Query immediately (step 0 = right after target injection)
+        q_input = tokenizer(query_prompt, return_tensors="pt").to("cuda")
+        out = manual_generate(model, tokenizer, q_input.input_ids, max_new_tokens=20)
+        resp = tokenizer.decode(out[0][q_input.input_ids.shape[1]:],
+                                skip_special_tokens=True).strip()
+        hit = expected.lower() in resp.lower()
+        step_responses.append((0, resp, hit))
+        print(f"  Step 0 (just injected): '{resp[:80]}' | hit={hit}")
+
+        # Inject distractors one by one, query after each
+        for i, dist in enumerate(distractors):
+            d_input = tokenizer(dist, return_tensors="pt",
+                                add_special_tokens=False).to("cuda")
+            d_mask = torch.cat([
+                torch.ones(1, model.num_tokens, device="cuda"),
+                d_input.attention_mask
+            ], dim=1)
+            model.inject_memory(d_input.input_ids, d_mask, update_memory=True)
+
+            out = manual_generate(model, tokenizer, q_input.input_ids,
+                                  max_new_tokens=20)
+            resp = tokenizer.decode(out[0][q_input.input_ids.shape[1]:],
+                                    skip_special_tokens=True).strip()
+            hit = expected.lower() in resp.lower()
+            step_responses.append((i + 1, resp, hit))
+            print(f"  Step {i+1} (after {i+1} distractors): '{resp[:80]}' | hit={hit}")
+
+        results[strategy] = step_responses
+
+    # Summary table
+    print("\n" + "-" * 60)
+    print("RETENTION SUMMARY")
+    print("-" * 60)
+    header = f"{'Strategy':<15}" + "".join(f"{'Step '+str(i):<10}" for i in range(len(distractors) + 1))
+    print(header)
+    for strategy, steps in results.items():
+        row = f"{strategy:<15}" + "".join(
+            f"{'HIT' if s[2] else 'MISS':<10}" for s in steps)
+        print(row)
+
+    return results
 
 
 # =========================================================================
@@ -654,6 +830,7 @@ def main():
     # Run tests
     if args.smoke_test:
         run_smoke_test(model, tokenizer, args.strategies)
+        run_mini_retention(model, tokenizer, args.strategies)
         profile_memory(model, tokenizer, args.strategies)
     elif args.profile_only:
         profile_memory(model, tokenizer, args.strategies)
