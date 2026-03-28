@@ -510,6 +510,37 @@ def run_smoke_test(model, tokenizer, strategies):
         unique_vals = torch.unique(logits[0, -1]).shape[0]
         print(f"[DIAG] Unique logit values in last position: {unique_vals}")
 
+    # Trace through decoder layers MANUALLY (bypass MemoryLLM forward)
+    print("\n[DIAG] --- Layer-by-layer trace (raw decoder, no MemoryLLM) ---")
+    with torch.no_grad():
+        embeds = model.model.embed_tokens(test_input.input_ids)
+        print(f"[DIAG] Embeds: nan={torch.isnan(embeds).any().item()} "
+              f"range=[{embeds.min().item():.4f}, {embeds.max().item():.4f}]")
+
+        hidden = embeds
+        pos_ids = torch.arange(0, hidden.shape[1], device="cuda").unsqueeze(0)
+
+        for i, layer in enumerate(model.model.layers):
+            hidden = layer(hidden, position_ids=pos_ids)[0]
+            has_nan = torch.isnan(hidden).any().item()
+            if has_nan or i < 3 or i >= len(model.model.layers) - 2:
+                hmin = hidden.min().item() if not has_nan else float('nan')
+                hmax = hidden.max().item() if not has_nan else float('nan')
+                print(f"[DIAG] Layer {i:2d}: nan={has_nan} range=[{hmin:.4f}, {hmax:.4f}]")
+            if has_nan:
+                print(f"[DIAG] *** NaN FIRST APPEARS at layer {i} ***")
+                break
+
+        if not torch.isnan(hidden).any():
+            hidden = model.model.norm(hidden)
+            logits_raw = model.lm_head(hidden).float()
+            print(f"[DIAG] Final logits: nan={torch.isnan(logits_raw).any().item()}")
+            top5 = torch.topk(logits_raw[0, -1], 5)
+            for j in range(5):
+                tid = top5.indices[j].item()
+                val = top5.values[j].item()
+                print(f"[DIAG]   #{j+1}: id={tid} logit={val:.4f} -> '{tokenizer.decode([tid])}'")
+
     print("[DIAG] ============================================\n")
 
     for strategy in strategies:
