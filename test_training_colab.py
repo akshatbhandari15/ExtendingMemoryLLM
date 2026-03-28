@@ -336,7 +336,8 @@ def run_retention_eval(model, tokenizer, dataset_name,
 # Smoke test
 # =========================================================================
 
-def manual_generate(model, tokenizer, input_ids, max_new_tokens=30):
+def manual_generate(model, tokenizer, input_ids, max_new_tokens=30,
+                    debug=False):
     """Generate tokens one at a time without relying on model.generate().
     This bypasses potential issues with GenerationMixin + MemoryLLM interaction."""
     generated = input_ids.clone()
@@ -344,16 +345,34 @@ def manual_generate(model, tokenizer, input_ids, max_new_tokens=30):
         for step in range(max_new_tokens):
             outputs = model(input_ids=generated, use_cache=False)
             logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            last_logits = logits[:, -1, :]
+
+            if debug and step == 0:
+                # Print logit diagnostics
+                print(f"    [debug] logits shape: {logits.shape}")
+                print(f"    [debug] last_logits stats: "
+                      f"min={last_logits.min().item():.3f} "
+                      f"max={last_logits.max().item():.3f} "
+                      f"mean={last_logits.mean().item():.3f} "
+                      f"std={last_logits.std().item():.3f}")
+                top5 = torch.topk(last_logits[0], 5)
+                for i in range(5):
+                    tid = top5.indices[i].item()
+                    val = top5.values[i].item()
+                    tok = tokenizer.decode([tid])
+                    print(f"    [debug] top-{i+1}: id={tid} val={val:.3f} -> '{tok}'")
+
+            next_token = last_logits.argmax(dim=-1, keepdim=True)
             tok_id = next_token.item()
-            # Debug: print first few tokens
-            if step < 3:
-                tok_str = tokenizer.decode([tok_id])
-                print(f"    [gen step {step}] token_id={tok_id} -> '{tok_str}'")
             # Stop on EOS or padding
             if tok_id in (tokenizer.eos_token_id, tokenizer.pad_token_id):
-                if step == 0:
+                if step == 0 and debug:
                     print(f"    WARNING: model produced EOS/PAD on first token!")
+                break
+            # Stop on <unk> (token 0) — model is broken
+            if tok_id == 0:
+                if step == 0 and debug:
+                    print(f"    WARNING: model produced <unk> (id=0) on first token!")
                 break
             generated = torch.cat([generated, next_token], dim=1)
     return generated
@@ -436,10 +455,29 @@ def run_smoke_test(model, tokenizer, strategies):
     model.initialized.fill_(0)  # Disable memory
     test_prompt = "The capital of France is"
     test_input = tokenizer(test_prompt, return_tensors="pt").to("cuda")
-    test_out = manual_generate(model, tokenizer, test_input.input_ids, max_new_tokens=10)
+    print(f"  Input ids: {test_input.input_ids}")
+    print(f"  Decoded input: '{tokenizer.decode(test_input.input_ids[0])}'")
+    print(f"  Model initialized: {model.initialized.item()}")
+    print(f"  _detach_memory: {model._detach_memory}")
+    test_out = manual_generate(model, tokenizer, test_input.input_ids,
+                               max_new_tokens=10, debug=True)
     test_resp = tokenizer.decode(test_out[0][test_input.input_ids.shape[1]:],
                                  skip_special_tokens=True).strip()
     print(f"  Prompt: '{test_prompt}' -> '{test_resp}'")
+
+    # Also test embeddings to verify model weights loaded correctly
+    print("\n[Debug] Checking model weights...")
+    with torch.no_grad():
+        embeds = model.model.embed_tokens(test_input.input_ids)
+        print(f"  Embed stats: min={embeds.min().item():.4f} "
+              f"max={embeds.max().item():.4f} "
+              f"mean={embeds.mean().item():.4f}")
+        print(f"  lm_head weight stats: min={model.lm_head.weight.min().item():.4f} "
+              f"max={model.lm_head.weight.max().item():.4f}")
+        print(f"  Vocab size: {model.config.vocab_size}")
+        print(f"  EOS token id: {tokenizer.eos_token_id}")
+        print(f"  PAD token id: {tokenizer.pad_token_id}")
+        print(f"  UNK token id: {tokenizer.unk_token_id}")
 
     for strategy in strategies:
         print(f"\n--- Strategy: {strategy} ---")
