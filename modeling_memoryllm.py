@@ -1877,9 +1877,10 @@ class MemoryLLM(LlamaForCausalLM):
             
         position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = self.model._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        )
+        # Skip _update_causal_mask: the decoder layers build their own causal
+        # mask via prefix_token_length when memory tokens are prepended.
+        # The base LlamaModel mask doesn't account for memory-augmented sequences.
+        causal_mask = None
         
         hidden_states = inputs_embeds
 
