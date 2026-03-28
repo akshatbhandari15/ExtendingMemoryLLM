@@ -450,34 +450,67 @@ def run_smoke_test(model, tokenizer, strategies):
         },
     ]
 
-    # -- First verify the base model can generate at all --
-    print("\n[Debug] Testing base model generation WITHOUT memory...")
+    # -- Diagnose the generation problem --
+    print("\n[DIAG] ============================================")
+    print("[DIAG] Diagnosing generation issue")
+    print("[DIAG] ============================================")
+
     model.initialized.fill_(0)  # Disable memory
     test_prompt = "The capital of France is"
     test_input = tokenizer(test_prompt, return_tensors="pt").to("cuda")
-    print(f"  Input ids: {test_input.input_ids}")
-    print(f"  Decoded input: '{tokenizer.decode(test_input.input_ids[0])}'")
-    print(f"  Model initialized: {model.initialized.item()}")
-    print(f"  _detach_memory: {model._detach_memory}")
-    test_out = manual_generate(model, tokenizer, test_input.input_ids,
-                               max_new_tokens=10, debug=True)
-    test_resp = tokenizer.decode(test_out[0][test_input.input_ids.shape[1]:],
-                                 skip_special_tokens=True).strip()
-    print(f"  Prompt: '{test_prompt}' -> '{test_resp}'")
+    print(f"[DIAG] Input ids: {test_input.input_ids}")
+    print(f"[DIAG] Decoded input: '{tokenizer.decode(test_input.input_ids[0])}'")
+    print(f"[DIAG] Model initialized: {model.initialized.item()}")
+    print(f"[DIAG] Vocab size: {model.config.vocab_size}")
+    print(f"[DIAG] EOS={tokenizer.eos_token_id} PAD={tokenizer.pad_token_id} UNK={tokenizer.unk_token_id}")
 
-    # Also test embeddings to verify model weights loaded correctly
-    print("\n[Debug] Checking model weights...")
     with torch.no_grad():
+        # Check embeddings
         embeds = model.model.embed_tokens(test_input.input_ids)
-        print(f"  Embed stats: min={embeds.min().item():.4f} "
-              f"max={embeds.max().item():.4f} "
-              f"mean={embeds.mean().item():.4f}")
-        print(f"  lm_head weight stats: min={model.lm_head.weight.min().item():.4f} "
+        print(f"[DIAG] Embed shape: {embeds.shape}")
+        print(f"[DIAG] Embed stats: min={embeds.min().item():.4f} "
+              f"max={embeds.max().item():.4f} mean={embeds.mean().item():.6f}")
+
+        # Check lm_head
+        print(f"[DIAG] lm_head weight shape: {model.lm_head.weight.shape}")
+        print(f"[DIAG] lm_head weight stats: min={model.lm_head.weight.min().item():.4f} "
               f"max={model.lm_head.weight.max().item():.4f}")
-        print(f"  Vocab size: {model.config.vocab_size}")
-        print(f"  EOS token id: {tokenizer.eos_token_id}")
-        print(f"  PAD token id: {tokenizer.pad_token_id}")
-        print(f"  UNK token id: {tokenizer.unk_token_id}")
+
+        # Full forward pass
+        print("[DIAG] Running full forward pass...")
+        outputs = model(input_ids=test_input.input_ids, use_cache=False)
+        print(f"[DIAG] Output type: {type(outputs)}")
+
+        if isinstance(outputs, tuple):
+            print(f"[DIAG] Output is tuple, len={len(outputs)}")
+            logits = outputs[0]
+        else:
+            print(f"[DIAG] Output has logits attr: {hasattr(outputs, 'logits')}")
+            logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
+
+        print(f"[DIAG] Logits shape: {logits.shape}")
+        print(f"[DIAG] Logits dtype: {logits.dtype}")
+        print(f"[DIAG] Logits[-1] stats: min={logits[0,-1].min().item():.4f} "
+              f"max={logits[0,-1].max().item():.4f} "
+              f"mean={logits[0,-1].mean().item():.6f} "
+              f"std={logits[0,-1].std().item():.4f}")
+        print(f"[DIAG] Any NaN in logits: {torch.isnan(logits).any().item()}")
+        print(f"[DIAG] Any Inf in logits: {torch.isinf(logits).any().item()}")
+
+        # Top-5 tokens
+        top5 = torch.topk(logits[0, -1], 5)
+        print("[DIAG] Top-5 predicted tokens:")
+        for i in range(5):
+            tid = top5.indices[i].item()
+            val = top5.values[i].item()
+            tok = tokenizer.decode([tid])
+            print(f"[DIAG]   #{i+1}: id={tid} logit={val:.4f} -> '{tok}'")
+
+        # Check if logits are all the same (degenerate)
+        unique_vals = torch.unique(logits[0, -1]).shape[0]
+        print(f"[DIAG] Unique logit values in last position: {unique_vals}")
+
+    print("[DIAG] ============================================\n")
 
     for strategy in strategies:
         print(f"\n--- Strategy: {strategy} ---")
