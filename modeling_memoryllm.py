@@ -323,41 +323,23 @@ class LlamaAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        prefix_token_length: int = 0,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
+        prefix_token_length = prefix_token_length or 0
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+        # Only project non-prefix tokens through Q (memory tokens only go through K/V)
+        query_states = self.q_proj(hidden_states[:, prefix_token_length:])
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
-
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
-
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
-
-        else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        query_states = query_states.view(bsz, q_len - prefix_token_length, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        try:
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        except:
-            import ipdb; jpdb.set_trace()
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, prefix_token_length=prefix_token_length)
 
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -369,7 +351,19 @@ class LlamaAttention(nn.Module):
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        if attention_mask is not None:  # no matter the length, we just slice it
+        if prefix_token_length > 0:
+            # Build causal mask that allows attending to all prefix (memory) tokens
+            causal_mask = torch.cat(
+                [
+                    torch.zeros(q_len - prefix_token_length, prefix_token_length, dtype=attn_weights.dtype, device=attn_weights.device),
+                    torch.ones(q_len - prefix_token_length, q_len - prefix_token_length, dtype=torch.bool, device=attn_weights.device).tril(diagonal=0).to(attn_weights.dtype).masked_fill(
+                        ~torch.ones(q_len - prefix_token_length, q_len - prefix_token_length, dtype=torch.bool, device=attn_weights.device).tril(diagonal=0),
+                        torch.finfo(attn_weights.dtype).min
+                    ),
+                ], dim=1
+            ).unsqueeze(0).unsqueeze(0)
+            attn_weights = attn_weights + causal_mask
+        elif attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
@@ -378,22 +372,10 @@ class LlamaAttention(nn.Module):
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
 
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
         attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len - prefix_token_length, -1)
 
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
@@ -547,10 +529,11 @@ class LlamaSdpaAttention(LlamaAttention):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                prefix_token_length=prefix_token_length,
+                prefix_token_length=prefix_token_length or 0,
             )
 
         bsz, q_len, _ = hidden_states.size()
+        prefix_token_length = prefix_token_length or 0
 
         query_states = self.q_proj(hidden_states[:, prefix_token_length:])
         key_states = self.k_proj(hidden_states)
