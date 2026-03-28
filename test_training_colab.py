@@ -258,7 +258,6 @@ def run_retention_eval(model, tokenizer, dataset_name,
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
     num_tokens = model.num_tokens
-    num_blocks = model.num_blocks
 
     collate = partial(
         collate_fn_qa, tokenizer=tokenizer, max_length=512,
@@ -285,7 +284,7 @@ def run_retention_eval(model, tokenizer, dataset_name,
             batch = [x.cuda() for x in batch]
 
             ctx_ids, ctx_mask = batch[0], batch[1]
-            q_ids, q_mask = batch[2], batch[3]
+            q_ids, _ = batch[2], batch[3]
             a_ids = batch[4]
 
             unrel = batch[6:]
@@ -301,25 +300,16 @@ def run_retention_eval(model, tokenizer, dataset_name,
             all_ctx_ids = [ctx_ids] + unrel_ids
             all_ctx_masks = [ctx_mask] + unrel_masks
 
-            mem_len = num_tokens * num_blocks + int(
-                getattr(model, 'add_bos_embedding', False))
-            query_mask = torch.cat([
-                torch.ones(q_mask.shape[0], mem_len, device="cuda"),
-                q_mask
-            ], dim=1)
-
             for idx, (ids, mask) in enumerate(
                     zip(all_ctx_ids, all_ctx_masks)):
                 model.inject_memory(ids, mask, update_memory=True)
 
-                output = model.generate(
-                    inputs=q_ids, attention_mask=query_mask,
-                    max_new_tokens=10,
-                    pad_token_id=tokenizer.pad_token_id,
-                )[:, len(q_ids[0]):][0].detach().cpu()
-
+                output = manual_generate(
+                    model, tokenizer, q_ids, max_new_tokens=10
+                )
+                pred_tokens = output[0, q_ids.shape[1]:].detach().cpu()
                 step_preds[f"step_{idx}"].append(
-                    tokenizer.decode(output, skip_special_tokens=False))
+                    tokenizer.decode(pred_tokens, skip_special_tokens=False))
 
             all_targets.append(
                 tokenizer.decode(a_ids[0], skip_special_tokens=False))
@@ -336,10 +326,54 @@ def run_retention_eval(model, tokenizer, dataset_name,
 # Smoke test
 # =========================================================================
 
+def manual_generate(model, tokenizer, input_ids, max_new_tokens=30):
+    """Generate tokens one at a time without relying on model.generate().
+    This bypasses potential issues with GenerationMixin + MemoryLLM interaction."""
+    generated = input_ids.clone()
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            outputs = model(input_ids=generated, use_cache=False)
+            logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
+            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            # Stop on EOS
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+            generated = torch.cat([generated, next_token], dim=1)
+    return generated
+
+
 def run_smoke_test(model, tokenizer, strategies):
     print("\n" + "=" * 60)
-    print("SMOKE TEST: Verify strategies with synthetic data")
+    print("SMOKE TEST: Verify strategies with real QA examples")
     print("=" * 60)
+
+    # Real SQuAD-style examples
+    qa_examples = [
+        {
+            "contexts": [
+                "Nikola Tesla was a Serbian-American inventor and electrical engineer. "
+                "He is best known for his contributions to the design of the modern "
+                "alternating current (AC) electricity supply system. Tesla was born on "
+                "10 July 1856 in Smiljan, Austrian Empire (modern-day Croatia).",
+                "The Amazon rainforest produces about 20 percent of the world's oxygen.",
+                "The Great Wall of China stretches over 13,000 miles across northern China.",
+            ],
+            "query": "Where was Nikola Tesla born?",
+            "expected": "Smiljan",
+        },
+        {
+            "contexts": [
+                "Marie Curie was a Polish and naturalized-French physicist and chemist. "
+                "She was the first woman to win a Nobel Prize, the first person to win "
+                "the Nobel Prize twice, and the only person to win the Nobel Prize in "
+                "two scientific fields: physics in 1903 and chemistry in 1911.",
+                "Mount Everest is 8,849 meters tall and located in the Himalayas.",
+                "The speed of light in vacuum is approximately 299,792 kilometers per second.",
+            ],
+            "query": "In what year did Marie Curie win the Nobel Prize in chemistry?",
+            "expected": "1911",
+        },
+    ]
 
     for strategy in strategies:
         print(f"\n--- Strategy: {strategy} ---")
@@ -352,49 +386,35 @@ def run_smoke_test(model, tokenizer, strategies):
             model.set_drop_strategy(strategy)
             model.reset_metadata()
 
-        contexts = [
-            "The capital of France is Paris. The Eiffel Tower is "
-            "located in Paris.",
-            "Albert Einstein developed the theory of relativity.",
-            "The Pacific Ocean is the largest ocean on Earth.",
-            "Python was created by Guido van Rossum in 1991.",
-            "The human body has 206 bones in the adult skeleton.",
-        ]
+        for ex in qa_examples:
+            # Inject all contexts
+            for ctx in ex["contexts"]:
+                ctx_input = tokenizer(
+                    ctx, return_tensors="pt",
+                    add_special_tokens=False).to("cuda")
+                inj_mask = torch.cat([
+                    torch.ones(1, model.num_tokens, device="cuda"),
+                    ctx_input.attention_mask
+                ], dim=1)
+                model.inject_memory(
+                    ctx_input.input_ids, inj_mask, update_memory=True)
 
-        for ctx in contexts:
-            ctx_input = tokenizer(
-                ctx, return_tensors="pt",
-                add_special_tokens=False).to("cuda")
-            attn_mask = torch.cat([
-                torch.ones(1, model.num_tokens).cuda(),
-                ctx_input.attention_mask
-            ], dim=1)
-            model.inject_memory(
-                ctx_input.input_ids, attn_mask, update_memory=True)
+            # Query with manual generation (bypass generate())
+            prompt = f"Answer the question based on context stored in memory.\nQuestion: {ex['query']}\nAnswer:"
+            q_input = tokenizer(prompt, return_tensors="pt").to("cuda")
 
-        query = "What is the capital of France?"
-        q_input = tokenizer(query, return_tensors="pt").to("cuda")
-        # Full memory is prepended during generation: num_blocks * num_tokens
-        # plus 1 for bos_embedding if enabled
-        mem_len = model.num_tokens * model.num_blocks + int(
-            getattr(model, 'add_bos_embedding', False))
-        q_mask = torch.cat([
-            torch.ones(1, mem_len, device="cuda"),
-            q_input.attention_mask
-        ], dim=1)
+            output = manual_generate(model, tokenizer, q_input.input_ids,
+                                     max_new_tokens=30)
+            response = tokenizer.decode(
+                output[0][q_input.input_ids.shape[1]:],
+                skip_special_tokens=True).strip()
 
-        with torch.no_grad():
-            output = model.generate(
-                inputs=q_input.input_ids, attention_mask=q_mask,
-                max_new_tokens=50, pad_token_id=tokenizer.pad_token_id,
-                do_sample=False)
-        response = tokenizer.decode(
-            output[0][len(q_input.input_ids[0]):],
-            skip_special_tokens=True)
-        print(f"  Query: {query}")
-        print(f"  Response: {response}")
+            contains_answer = ex["expected"].lower() in response.lower()
+            print(f"  Q: {ex['query']}")
+            print(f"  A: {response[:120]}")
+            print(f"  Expected: {ex['expected']} | Found: {contains_answer}")
+
         print_gpu_stats(f"After {strategy}")
-
         if hasattr(model, 'get_strategy_info'):
             print(f"  Info: {model.get_strategy_info()}")
 
