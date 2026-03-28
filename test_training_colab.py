@@ -301,9 +301,10 @@ def run_retention_eval(model, tokenizer, dataset_name,
             all_ctx_ids = [ctx_ids] + unrel_ids
             all_ctx_masks = [ctx_mask] + unrel_masks
 
+            mem_len = num_tokens * num_blocks + int(
+                getattr(model, 'add_bos_embedding', False))
             query_mask = torch.cat([
-                torch.ones(q_mask.shape[0],
-                           num_tokens * (num_blocks - 1)).cuda(),
+                torch.ones(q_mask.shape[0], mem_len, device="cuda"),
                 q_mask
             ], dim=1)
 
@@ -373,15 +374,20 @@ def run_smoke_test(model, tokenizer, strategies):
 
         query = "What is the capital of France?"
         q_input = tokenizer(query, return_tensors="pt").to("cuda")
+        # Full memory is prepended during generation: num_blocks * num_tokens
+        # plus 1 for bos_embedding if enabled
+        mem_len = model.num_tokens * model.num_blocks + int(
+            getattr(model, 'add_bos_embedding', False))
         q_mask = torch.cat([
-            torch.ones(
-                1, model.num_tokens * (model.num_blocks - 1)).cuda(),
+            torch.ones(1, mem_len, device="cuda"),
             q_input.attention_mask
         ], dim=1)
 
-        output = model.generate(
-            inputs=q_input.input_ids, attention_mask=q_mask,
-            max_new_tokens=15, pad_token_id=tokenizer.pad_token_id)
+        with torch.no_grad():
+            output = model.generate(
+                inputs=q_input.input_ids, attention_mask=q_mask,
+                max_new_tokens=50, pad_token_id=tokenizer.pad_token_id,
+                do_sample=False)
         response = tokenizer.decode(
             output[0][len(q_input.input_ids[0]):],
             skip_special_tokens=True)
