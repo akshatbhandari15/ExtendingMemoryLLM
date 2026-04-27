@@ -51,9 +51,23 @@ Both files are on HuggingFace `YuWangX/KnowledgeRetention` — same `hf_hub_down
 
 ## Issue #12: [EVAL] NaturalQA retention curves — all 4 strategies
 
-Depends on #5. Run 100 NQ examples × 20 distractor steps for each of: random, attention, age, surprise. Save to `results/nq_*.json`.
+Depends on #5 (done ✓). Run 100 NQ examples × 20 distractor steps for each of: random, attention, age, surprise. Save to `results/nq_*.json`.
 
-Status: Blocked on #5.
+### Bug fix (2026-04-27)
+
+`dataset/nq.py` assumed a train JSONL file existed for distractor contexts — we only have the dev file. Fixed: save all loaded long answers before index re-selection, then use non-eval dev entries as distractor contexts when train file is absent. For `num=100` there are ~159 non-eval entries in the loaded range — plenty for 20 distractor contexts.
+
+### To run (on Colab A100)
+
+```bash
+python run_eval.py --strategy all --dataset nq --nuc 20 --num_samples 100 --output_dir results/ --resume
+```
+
+Saves: `results/nq_random_nuc20.json`, `results/nq_attention_nuc20.json`, `results/nq_age_nuc20.json`, `results/nq_surprise_nuc20.json`
+
+Estimated runtime: ~8–10 hr on A100 (4 strategies × 100 examples × 20 steps).
+
+Status: Fix committed — ready to run on Colab.
 
 ---
 
