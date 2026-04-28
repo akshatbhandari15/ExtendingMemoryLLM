@@ -172,3 +172,130 @@ This gives each layer a slightly different ranking without destroying the age-ba
 - [ ] **Writeup:** Add clear explanation of 3B (profiling) vs 8B (eval) model choice
 - [x] **Issue #5:** Download NaturalQA data files — DONE
 - [ ] **Issues #12→#13→#14:** Run NQ evals, plot retention curves, compute AUC
+
+---
+
+## Debug session 2026-04-28 — fixing the zero-accuracy eval
+
+The previous NQ run produced AUCs of 0.045 / 0.030 / 0.030 / 0.000 across the four strategies — essentially noise. Spent a session bisecting the cause. Found **four distinct bugs**, all now fixed on `ketaki`. Tracking each below for future-us when something breaks again.
+
+### Bug 1 — `LlamaTokenizer` against a Llama-3 model
+
+`run_eval.py`, `run_sanity.py`, `dataset/nq.py`, `dataset/squad.py` all imported `LlamaTokenizer`. MemoryLLM-8B is built on Llama-3 (tiktoken-based BPE), but `LlamaTokenizer` is the SentencePiece tokenizer for Llama-1/2 — different vocab, different special tokens.
+
+**Fix (commit `30f3961`):** Swapped to `AutoTokenizer` everywhere. Also dropped the `+ "</s>"` hack appended to gold answers in `run_eval.py:89` (that's the Llama-2 EOS string; Llama-3 uses `<|end_of_text|>`). Updated `exact_hit` to strip both for safety.
+
+This alone wasn't the main bug — but it would have produced wrong token IDs at inject time and corrupted comparisons.
+
+### Bug 2 — peft version drift silently dropping 384 LoRA decoder adapters (the critical one)
+
+The repo locks `transformers==4.48.2`, `peft==0.10.0`. Colab now ships `transformers 5.0.0`, `peft 0.19.1`, `torch 2.10`. Under the new peft, `get_peft_model(self.model, peft_config, adapter_name="decoder_adapter")` raises `AttributeError`. The old code in `modeling_memoryllm.py:1554-1566` swallowed it silently with a warning that said:
+
+> "Skipping LoRA wrapping due to peft version incompatibility. This is fine for inference with pretrained checkpoints."
+
+**That comment was wrong.** The checkpoint ships LoRA weights as **separate keys** (`model.layers.{0..31}.{q,k,v,gate,up,down}_proj.lora_{A,B}.decoder_adapter.weight` = 32 × 12 = **384 keys**). Skipping the peft wrapping means those keys land in `unexpected_keys` and are dropped — the model loses its trained pathway from memory pool → output. That is exactly why NQ accuracy was ~0%: memory was loaded but the decoder couldn't read it.
+
+**Diagnosis:** `run_sanity.py` (issue #31) printed `unexpected_keys: 384` with `LoRA decoder_adapter` keys all listed. That's how we caught it.
+
+**Fix:** Pin compatible versions on Colab — `pip install "transformers==4.48.2" "peft==0.10.0" "accelerate==1.2.0"`, then restart runtime. After this: `unexpected_keys: 0`, sanity step-0 jumped from 0.03 → 0.667.
+
+Also patched the warning in `modeling_memoryllm.py:1554-1566` (commit `898b6b7`) to surface the actual `AttributeError` and warn that retention will be near-zero — so this never sneaks back silently.
+
+### Bug 3 — `dataset/squad.py` had no fallback when `train-v2.0.json` is missing
+
+NQ already had this fallback (commit `5c8472c`); SQuAD didn't. Sanity check failed on `FileNotFoundError: train-v2.0.json` once the LoRA bug was fixed and we tried to actually run.
+
+**Fix (commit `898b6b7`):** Mirrored the NQ pattern — when train file is absent, build distractor contexts from non-eval entries in the dev file. Uses `eval_indices_set` to avoid leakage between target and distractors.
+
+### Bug 4 — NQ wrapping context/question, breaking generation format
+
+`dataset/nq.py:170-171` returned `"Context: " + long_answer` and `"Questions: " + question + "? Answer:"`. SQuAD returned raw text. The wrapped format pushed the model into "Q&A page completion" mode — it produced fragments of the long_answer paragraph instead of extracting the short answer.
+
+Sample broken output (Mo Farah question, before fix):
+```
+target: 'Mo Farah'
+step_0: ' The New Yorkshire of the National Health Care to'
+step_1: ' Sports Personality of the Year in the Year 201'  # ← regurgitating context
+```
+
+**Fix (commit `9e12e55`):** Match SQuAD format — return raw `long_answer` and raw `question` text. After this, predictions became semantically related to the question (e.g., "Gareth Barry" target → step_0 contained "Gareth Barry").
+
+### Bug 5 — Memory reset to zeros instead of pretrained checkpoint state (also critical)
+
+`run_eval.py:166` had:
+```python
+model.memory.data = torch.zeros_like(model.memory.data)
+```
+
+Every example, this wiped the pretrained memory pool to zeros. `inject_memory` only overwrites **one block** of `num_tokens=256` per call — but the pool has `num_blocks=50` blocks for a total of 12,800 tokens. So **49/50 of the pool stayed zero** for the entire example, instead of being the trained checkpoint state.
+
+The sanity check actually proved this was destructive: its `zeroed` condition (same operation) scored 0.033 step-0; `normal` (reset to checkpoint) scored 0.667. **Our eval was running under the `zeroed` condition.** That explains why it appeared everything was broken even after fixing 1–4.
+
+**Fix (commit `ca75cac`):** Snapshot `checkpoint_memory = model.memory.data.detach().clone()` once at the top of the eval loop, then `model.memory.data.copy_(checkpoint_memory)` before each example.
+
+NQ smoke after this fix: step-0 accuracy 0.30, predictions semantically aligned with targets. Pipeline working.
+
+### E0 sanity check (issue #31) — PASSED ✓
+
+Run: `python run_sanity.py --num_samples 30 --nuc 5` on SQuAD with the patched stack.
+
+**LOAD REPORT:**
+- `missing_keys: 0`, `unexpected_keys: 0`, `mismatched_keys: 0`
+- memory keys missing: none
+- `initialized: 1` (memory populated during pretraining)
+- `memory.shape: (32, 12800, 4096)`, mean=-0.0009, std=0.3359, abs_max=125.0
+
+**VERDICT:**
+
+| Condition | step-0 | step-5 | AUC |
+|---|---|---|---|
+| normal | **0.667** | 0.600 | 2.500 |
+| zeroed | 0.033 | 0.000 | 0.050 |
+| scrambled | 0.633 | 0.433 | 2.233 |
+
+`normal − zeroed = +0.633` (>>0.10 threshold). Memory contributes substantially to retention. Pipeline measures something real. **PASS** — closes #31.
+
+Side note: scrambled performs almost as well as normal at step-0 (0.633 vs 0.667). Ordering of memory tokens matters less than the LoRA decoder adapter and the *presence* of trained weights in the pool. Worth a sentence in the report's analysis section — interesting and unexpected.
+
+### Files touched in this session
+
+| Commit | What |
+|---|---|
+| `30f3961` | `LlamaTokenizer` → `AutoTokenizer` in run_eval.py, run_sanity.py, dataset/{nq,squad}.py; drop `</s>` hack |
+| `898b6b7` | squad.py dev-fallback for distractors; surface peft load error in modeling_memoryllm.py |
+| `9e12e55` | NQ returns raw context/question (drop "Context: " / "Questions: ... Answer:" wrapper) |
+| `ca75cac` | run_eval.py reset memory to checkpoint not zeros |
+
+### Lesson for future debugging
+
+Both critical bugs (peft and memory-reset) were silent failures producing plausible-looking-but-wrong numbers. The sanity check (issue #31) caught both — it's the only diagnostic that compares known-good (`normal`) to known-bad (`zeroed`) conditions. **Always run sanity before spending GPU hours.** It's a 15-min run on A100 and would have saved this whole session if it had been run before the previous 8-hr eval.
+
+---
+
+## Phase D analysis scripts (added 2026-04-28)
+
+Three scripts in `analysis/`, ready to run as soon as the 8 JSONs land:
+
+- **`analysis/plot_retention.py`** → `figures/retention_{squad,nq}.png` — overlaid 4-strategy decay curves per dataset. Closes #13.
+- **`analysis/auc_table.py`** → `results/auc_summary.csv` — table for paper. Closes #14.
+- **`analysis/significance.py`** → `results/significance.csv` — bootstrap 95% CIs on AUC + paired permutation tests vs `random`, Bonferroni-corrected over 3 comparisons. Closes #25.
+
+Run with defaults; for paper-final numbers bump iters: `python analysis/significance.py --bootstrap_iters 5000 --perm_iters 10000`.
+
+---
+
+## Current run status (2026-04-28 evening)
+
+- ▶ NQ all-strategies eval running on Colab (Ketaki's account, ~16 hr ETA). Saving to Drive at `MyDrive/ExtendingMemoryLLM/results/`. Uses `--resume` so disconnects don't kill it.
+- ⏸ SQuAD all-strategies eval — to be kicked off by Akshat (random + attention) and Tushar (age + surprise) on their accounts using the same `ketaki` branch at commit `ca75cac` or newer. They MUST pin the same `transformers==4.48.2 peft==0.10.0` versions.
+- Once 8 JSONs land in `results/`, run the three analysis scripts; embed outputs into `report/experiments.md` (#28).
+- nuc=20, num_samples=100 is the only configuration we're running — additional NUC values are redundant since `accuracy_per_step[k]` for k<20 is already in the nuc=20 curve. N=100 gives ~±10pp 95% CI per point.
+
+### Updated open actions
+
+- [ ] Wait for NQ run to finish; download JSONs from Drive
+- [ ] Confirm Akshat/Tushar SQuAD results land
+- [ ] Run analysis scripts → produce figures + CSVs
+- [ ] Draft #26 Intro/Related Work and #27 Methods *now* while runs go (no numbers needed)
+- [ ] After analysis: #28 Experiments, #29 Discussion, #30 Abstract
+- [ ] Slides #16/#17/#18
