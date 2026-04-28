@@ -167,5 +167,5 @@ class NQDataset(Dataset):
         #     unrelated_contexts.append(self.long_answers[random_idx])
         #     selected_indices.append(random_idx)
         
-        return "Context: " + self.long_answers[idx], "Questions: " + self.questions[idx] + "? Answer:", \
+        return self.long_answers[idx], self.questions[idx], \
         self.short_answers[idx], self.unrelated_contexts
