@@ -185,7 +185,7 @@ def main():
         results["accuracy_per_step_by_condition"][condition] = accs
         print(f"    step-0 acc         : {accs[0]:.3f}")
         print(f"    step-{args.nuc:<2} acc        : {accs[-1]:.3f}")
-        print(f"    AUC (trapz)        : {float(np.trapz(accs)):.3f}")
+        print(f"    AUC (trapz)        : {float(np.trapezoid(accs)):.3f}")
 
     # Verdict
     normal0  = results["accuracy_per_step_by_condition"]["normal"][0]
