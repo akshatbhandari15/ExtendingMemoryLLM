@@ -23,14 +23,14 @@ class SQuADDataset(Dataset):
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
             self.tokenizer.pad_token = self.tokenizer.eos_token
         elif tokenizer == 'llama':
-            from transformers import LlamaTokenizer
+            from transformers import AutoTokenizer
 
-            # debug:
             if tokenizer_path is None:
                 self.tokenizer = AutoTokenizer.from_pretrained("openlm-research/open_llama_3b_v2")
             else:
                 self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
         else:
             # raise ValueError("tokenizer must be one of ['gpt2', 'llama']")

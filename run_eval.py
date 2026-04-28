@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from transformers import LlamaTokenizer
+from transformers import AutoTokenizer
 
 from modeling_memoryllm_strategies import MemoryLLMWithStrategies
 from dataset.nq import NQDataset
@@ -86,7 +86,7 @@ def collate_fn(data, tokenizer, max_length, num_tokens, padding="longest"):
 
     ctx   = tok(contexts,  512,        padding)
     quest = tok(questions, max_length, "longest")
-    ans   = tok([a + "</s>" for a in answers], max_length, "longest")
+    ans   = tok(list(answers), max_length, "longest")
 
     # unrelated_contexts shape: (batch, nuc) -> transpose to (nuc, batch)
     unrelated = np.array(unrelated_contexts).transpose().tolist()
@@ -135,7 +135,7 @@ def build_dataloader(dataset_name, model_path, nuc, num_samples, num_tokens, tok
 def exact_hit(predictions, targets):
     """Fraction of predictions that contain the gold answer as a substring."""
     hits = sum(
-        t.replace("</s>", "").strip() in p
+        t.replace("</s>", "").replace("<|end_of_text|>", "").strip() in p
         for p, t in zip(predictions, targets)
     )
     return hits / max(len(predictions), 1)
@@ -280,7 +280,9 @@ def main():
     print(f"Loading {args.model} ...")
     model = MemoryLLMWithStrategies.from_pretrained(args.model).to(device).to(dtype)
     model.eval()
-    tokenizer = LlamaTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     print(f"Model loaded — device: {device}, dtype: {args.dtype}")
 
     for strategy in strategies:

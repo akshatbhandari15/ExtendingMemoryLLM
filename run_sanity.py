@@ -27,7 +27,7 @@ import os
 import numpy as np
 import torch
 from tqdm import tqdm
-from transformers import LlamaTokenizer
+from transformers import AutoTokenizer
 
 from modeling_memoryllm_strategies import MemoryLLMWithStrategies
 from run_eval import build_dataloader, exact_hit
@@ -118,7 +118,9 @@ def main():
     )
     model = model.to(device).to(dtype)
     model.eval()
-    tokenizer = LlamaTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     # LOAD REPORT — the core of the sanity check
     missing    = load_info.get("missing_keys", [])
