@@ -1,0 +1,5 @@
+dataset,strategy,baseline,auc,auc_ci_lo,auc_ci_hi,delta_auc,p_value,p_bonf,n_pairs,sig
+nq,attention,random,1.78,1.0949,2.5351,0.23,0.11238,0.33713,3,ns
+nq,age,random,1.875,1.2047,2.6451,0.325,0.08218,0.24655,3,ns
+nq,surprise,random,1.915,1.355,2.55,0.365,0.11798,0.35393,3,ns
+nq,random,(self),1.55,0.98,2.185,0.0,1.0,1.0,3,—

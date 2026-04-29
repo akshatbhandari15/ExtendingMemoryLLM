@@ -132,12 +132,18 @@ def build_dataloader(dataset_name, model_path, nuc, num_samples, num_tokens, tok
 # Eval loop
 # ---------------------------------------------------------------------------
 
+def _normalize(s):
+    """SQuAD-style: drop EOS markers, lowercase, strip punct, collapse whitespace."""
+    import re, string
+    s = s.replace("</s>", "").replace("<|end_of_text|>", "")
+    s = s.lower()
+    s = "".join(c for c in s if c not in string.punctuation)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def exact_hit(predictions, targets):
-    """Fraction of predictions that contain the gold answer as a substring."""
-    hits = sum(
-        t.replace("</s>", "").replace("<|end_of_text|>", "").strip() in p
-        for p, t in zip(predictions, targets)
-    )
+    """Fraction of predictions that contain the gold answer (normalized substring)."""
+    hits = sum(_normalize(t) in _normalize(p) for p, t in zip(predictions, targets))
     return hits / max(len(predictions), 1)
 
 

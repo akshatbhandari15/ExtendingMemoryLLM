@@ -31,15 +31,23 @@ DATASETS = ["squad", "nq"]
 BASELINE = "random"
 
 
+def _normalize(s):
+    import re, string
+    s = s.replace("</s>", "").replace("<|end_of_text|>", "")
+    s = s.lower()
+    s = "".join(c for c in s if c not in string.punctuation)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def per_example_hit_matrix(per_example, nuc):
     """Return an (N_examples, nuc+1) bool array of hit/miss per example per step."""
     N = len(per_example)
     M = np.zeros((N, nuc + 1), dtype=bool)
     for i, ex in enumerate(per_example):
-        target = ex["target"].replace("</s>", "").replace("<|end_of_text|>", "").strip()
+        t = _normalize(ex["target"])
         for s in range(nuc + 1):
-            pred = ex["step_preds"].get(f"step_{s}", "")
-            M[i, s] = target in pred
+            p = _normalize(ex["step_preds"].get(f"step_{s}", ""))
+            M[i, s] = t in p
     return M
 
 
