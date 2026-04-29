@@ -2,6 +2,9 @@ data/**
 !data/README.md
 __pycache__
 **/.DS_Store
+*.stackdump
+*.zip
+*.ipynb
 train/data/redpajama/documents
 train/data/redpajama/listings
 train/logs

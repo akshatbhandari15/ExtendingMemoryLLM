@@ -68,6 +68,15 @@ def parse_args():
                    choices=["float16", "bfloat16"])
     p.add_argument("--resume",      action="store_true",
                    help="Skip strategies whose output file already exists")
+    p.add_argument("--seed",        type=int, default=0,
+                   help="Random seed for reproducibility")
+    p.add_argument("--drop_per_layer", action="store_true",
+                   help="Enable per-layer independent dropping (default: shared across layers). "
+                        "Per-layer mode lets each transformer layer drop different tokens, "
+                        "matching the structural advantage random has in theory.")
+    p.add_argument("--log_dropped", action="store_true",
+                   help="Log which token positions are dropped at each step. "
+                        "Saves a companion *_dropped.json for Layer-Jaccard analysis.")
     return p.parse_args()
 
 
@@ -114,7 +123,6 @@ def build_dataloader(dataset_name, model_path, nuc, num_samples, num_tokens, tok
     kwargs = dict(
         num=num_samples,
         num_unrelated_contexts=nuc,
-        tokenizer="llama",
         tokenizer_path=model_path,
     )
     if dataset_name == "squad":
@@ -175,6 +183,7 @@ def run_retention_eval(model, tokenizer, dataloader, nuc, device):
 
             # Reset memory to pretrained checkpoint state for this example
             model.memory.data.copy_(checkpoint_memory)
+            model.mark_new_example()
 
             # Injection sequence: target first, then distractors
             seq_ids   = [ctx_ids]  + [unrel[i * 2]     for i in range(nuc)]
@@ -222,22 +231,35 @@ def run_retention_eval(model, tokenizer, dataloader, nuc, device):
 # Per-strategy runner
 # ---------------------------------------------------------------------------
 
+def _result_stem(args, strategy):
+    """Build the base filename stem encoding all experiment dimensions."""
+    stem = f"{args.dataset}_{strategy}_nuc{args.nuc}"
+    if getattr(args, "drop_per_layer", False):
+        stem += "_perlayer"
+    if getattr(args, "seed", 0) != 0:
+        stem += f"_seed{args.seed}"
+    return stem
+
+
 def run_strategy(strategy, model, tokenizer, args, device):
-    out_path = os.path.join(
-        args.output_dir,
-        f"{args.dataset}_{strategy}_nuc{args.nuc}.json",
-    )
+    stem     = _result_stem(args, strategy)
+    out_path = os.path.join(args.output_dir, f"{stem}.json")
 
     if args.resume and os.path.exists(out_path):
         print(f"  [skip] {out_path} already exists")
         return
 
     print(f"\n{'='*60}")
-    print(f"  Strategy : {strategy}")
-    print(f"  Dataset  : {args.dataset}  |  NUC: {args.nuc}  |  N: {args.num_samples}")
+    print(f"  Strategy     : {strategy}")
+    print(f"  Dataset      : {args.dataset}  |  NUC: {args.nuc}  |  N: {args.num_samples}")
+    print(f"  drop_per_layer: {getattr(args, 'drop_per_layer', False)}  |  seed: {getattr(args, 'seed', 0)}")
     print(f"{'='*60}")
 
     model.set_drop_strategy(strategy)
+    model.drop_memory_per_layer = getattr(args, "drop_per_layer", False)
+
+    if getattr(args, "log_dropped", False):
+        model.enable_drop_logging()
 
     dataloader = build_dataloader(
         args.dataset, args.model, args.nuc,
@@ -275,6 +297,14 @@ def run_strategy(strategy, model, tokenizer, args, device):
         json.dump(results, f, indent=2)
     print(f"  Saved -> {out_path}")
 
+    if getattr(args, "log_dropped", False):
+        drop_log = model.get_drop_log()
+        drop_path = os.path.join(args.output_dir, f"{stem}_dropped.json")
+        with open(drop_path, "w") as f:
+            json.dump({"config": results["config"], "drop_log": drop_log}, f)
+        print(f"  Drop log -> {drop_path}  ({len(drop_log)} entries)")
+        model.disable_drop_logging()
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -285,6 +315,9 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     strategies = STRATEGIES if args.strategy == "all" else [args.strategy]
 

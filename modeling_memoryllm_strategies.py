@@ -56,6 +56,11 @@ class MemoryLLMWithStrategies(MemoryLLM):
         # Track total update steps
         self._update_count = 0
 
+        # Drop logging (off by default — enable with enable_drop_logging())
+        self._logging_drops = False
+        self._drop_log: list = []          # list of {step, layer, dropped} dicts
+        self._drop_log_example_idx = 0
+
     def set_drop_strategy(self, strategy: str, **kwargs):
         """Set the dropping strategy. Options: random, attention, age, surprise, fisher."""
         if strategy not in self.STRATEGIES:
@@ -249,6 +254,7 @@ class MemoryLLMWithStrategies(MemoryLLM):
             K = delta_memory.shape[1]
 
             if self.drop_memory_per_layer:
+                layer_drops = {}
                 for idx in range(len(self.memory)):
                     current_memory = self.memory.data[idx].detach()
 
@@ -261,9 +267,18 @@ class MemoryLLMWithStrategies(MemoryLLM):
                     )
 
                     self.memory.data[idx] = torch.cat([current_memory, delta_memory[idx]], dim=0)
-
-                    # Update metadata for this layer
                     self._update_metadata_after_drop(idx, remaining_indices, dropped_indices, K)
+
+                    if self._logging_drops:
+                        layer_drops[idx] = dropped_indices.cpu().tolist()
+
+                if self._logging_drops and layer_drops:
+                    self._drop_log.append({
+                        "example": self._drop_log_example_idx,
+                        "step":    self._update_count,
+                        "mode":    "per_layer",
+                        "layers":  layer_drops,
+                    })
 
             else:
                 current_memory = self.memory.data.detach()
@@ -281,9 +296,17 @@ class MemoryLLMWithStrategies(MemoryLLM):
                 else:
                     self.memory.data = torch.cat([current_memory, delta_memory], dim=1)
 
-                # Update metadata for all layers (shared indices)
                 for idx in range(self.L):
                     self._update_metadata_after_drop(idx, remaining_indices, dropped_indices, K)
+
+                if self._logging_drops:
+                    self._drop_log.append({
+                        "example": self._drop_log_example_idx,
+                        "step":    self._update_count,
+                        "mode":    "shared",
+                        # same positions for all layers — store once
+                        "shared_dropped": dropped_indices.cpu().tolist(),
+                    })
 
         if not self.initialized:
             self.initialized += 1
@@ -438,3 +461,27 @@ class MemoryLLMWithStrategies(MemoryLLM):
             self._token_ages[idx] = np.zeros(N, dtype=np.int64)
             self._fisher_scores[idx] = torch.zeros(N)
         self._update_count = 0
+
+    # -------------------------------------------------------------------------
+    # Drop logging — records which positions are evicted per (example, step, layer)
+    # -------------------------------------------------------------------------
+
+    def enable_drop_logging(self):
+        self._logging_drops = True
+        self._drop_log = []
+        self._drop_log_example_idx = 0
+
+    def disable_drop_logging(self):
+        self._logging_drops = False
+
+    def mark_new_example(self):
+        """Call before each eval example to increment the example counter in the log."""
+        if self._logging_drops:
+            self._drop_log_example_idx += 1
+
+    def get_drop_log(self) -> list:
+        return self._drop_log
+
+    def clear_drop_log(self):
+        self._drop_log = []
+        self._drop_log_example_idx = 0
