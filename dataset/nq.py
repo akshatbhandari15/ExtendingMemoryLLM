@@ -26,14 +26,14 @@ class NQDataset(Dataset):
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
             self.tokenizer.pad_token = self.tokenizer.eos_token
         elif tokenizer == 'llama':
-            from transformers import LlamaTokenizer
+            from transformers import AutoTokenizer
 
-            # debug:
             if tokenizer_path is None:
-                self.tokenizer = LlamaTokenizer.from_pretrained("openlm-research/open_llama_3b_v2")
+                self.tokenizer = AutoTokenizer.from_pretrained("openlm-research/open_llama_3b_v2")
             else:
-                self.tokenizer = LlamaTokenizer.from_pretrained(tokenizer_path)
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
         else:
             # raise ValueError("tokenizer must be one of ['gpt2', 'llama']")
@@ -82,6 +82,11 @@ class NQDataset(Dataset):
                 # if num is not None and len(self.questions) == num: break
 
                 if (num is not None) and (num < len(indices)) and len(self.questions) == indices[num] + 1: break
+
+        # Save all loaded answers before re-selection so we can use non-eval entries as distractors
+        _all_loaded_long_answers = list(self.long_answers)
+        _eval_indices_set = set(indices[:num].tolist() if (num is not None and num < len(indices)) else indices.tolist())
+
         if num is not None:
             indices = indices[:num]
         self.questions = [self.questions[i] for i in indices]
@@ -91,45 +96,51 @@ class NQDataset(Dataset):
 
         if num_unrelated_contexts > 0:
             self.unrelated_contexts = []
-            # train_filename = filename.replace("dev-all", "train")
             train_filename = os.path.join(os.path.dirname(filename), 'v1.0-simplified_simplified-nq-train.jsonl')
-            with open(train_filename, 'r') as file:
-                for line in file:
-                    json_obj = json.loads(line)
+            if os.path.exists(train_filename):
+                with open(train_filename, 'r') as file:
+                    for line in file:
+                        json_obj = json.loads(line)
 
-                    if json_obj['annotations'][0]['yes_no_answer'] == 'None':
+                        if json_obj['annotations'][0]['yes_no_answer'] == 'None':
+                            continue
+
+                        long_answer = json_obj['annotations'][0]['long_answer']
+                        start_token = long_answer['start_token']
+                        end_token = long_answer['end_token']
+
+                        if 'document_tokens' in json_obj:
+                            tokens = json_obj['document_tokens']
+                            long_answer_tokens = tokens[start_token:end_token]
+                            long_answer_text = " ".join(token['token'] for token in long_answer_tokens if not token['html_token'])
+                        else:
+                            tokens = json_obj['document_text']
+                            long_answer_text = tokens[start_token-1:end_token]
+
+                        if len(self.unrelated_contexts) == 0:
+                            self.unrelated_contexts.append(long_answer_text)
+                            continue
+
+                        if len(self.tokenizer(self.unrelated_contexts[-1], add_special_tokens=False).input_ids) <= 512:
+                            self.unrelated_contexts[-1] += ' ' + long_answer_text
+                        else:
+                            if len(self.unrelated_contexts) == self.num_unrelated_contexts:
+                                break
+                            self.unrelated_contexts.append(long_answer_text)
+            else:
+                # No train file: use non-eval entries already loaded from the dev file
+                for i, context in enumerate(_all_loaded_long_answers):
+                    if i in _eval_indices_set:
                         continue
-
-                    question_text = json_obj['question_text']
-                    long_answer = json_obj['annotations'][0]['long_answer']
-                    
-                    start_token = long_answer['start_token']
-                    end_token = long_answer['end_token']
-
-                    # Get the list of tokens
-                    if 'document_tokens' in json_obj:
-                        tokens = json_obj['document_tokens']
-                        long_answer_tokens = tokens[start_token:end_token]
-                        # Concatenate the token texts to get the long answer text
-                        long_answer_text = " ".join(token['token'] for token in long_answer_tokens if not token['html_token'])
-                    else:
-                        tokens = json_obj['document_text']
-                        # Extract the tokens of the long answer
-                        long_answer_text = tokens[start_token-1:end_token]
-                    
                     if len(self.unrelated_contexts) == 0:
-                        self.unrelated_contexts.append(long_answer_text)
+                        self.unrelated_contexts.append(context)
                         continue
-                        
                     if len(self.tokenizer(self.unrelated_contexts[-1], add_special_tokens=False).input_ids) <= 512:
-                        self.unrelated_contexts[-1] += ' ' + long_answer_text
+                        self.unrelated_contexts[-1] += ' ' + context
                     else:
                         if len(self.unrelated_contexts) == self.num_unrelated_contexts:
                             break
-                        self.unrelated_contexts.append(long_answer_text)
-
-                    
-        
+                        self.unrelated_contexts.append(context)
         else:
             self.unrelated_contexts = []
         print("Length of unrelated contexts:", len(self.unrelated_contexts))
@@ -156,5 +167,5 @@ class NQDataset(Dataset):
         #     unrelated_contexts.append(self.long_answers[random_idx])
         #     selected_indices.append(random_idx)
         
-        return "Context: " + self.long_answers[idx], "Questions: " + self.questions[idx] + "? Answer:", \
+        return self.long_answers[idx], self.questions[idx], \
         self.short_answers[idx], self.unrelated_contexts

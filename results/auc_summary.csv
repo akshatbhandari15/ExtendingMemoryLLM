@@ -1,0 +1,9 @@
+dataset,strategy,nuc,num_samples,auc,step_0,step_final,elapsed_s
+squad,random,20,100,8.005,0.55,0.34,2523.0
+squad,attention,20,100,7.675,0.53,0.36,2549.6
+squad,age,20,100,8.465,0.49,0.42,7582.3
+squad,surprise,20,100,7.745,0.42,0.35,2689.1
+nq,random,20,100,1.55,0.14,0.06,2462.0
+nq,attention,20,100,1.78,0.2,0.06,2443.7
+nq,age,20,100,1.875,0.1,0.07,7337.4
+nq,surprise,20,100,1.915,0.12,0.07,2600.1

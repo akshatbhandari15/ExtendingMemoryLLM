@@ -163,8 +163,13 @@ class MemoryLLMWithStrategies(MemoryLLM):
                         # Older tokens: importance decreases with age
                         # Inverse age = younger tokens more important
                         importance[i] = 1.0 / (ages[i] + 1)
-                # Add small noise to break ties among protected tokens
-                importance += torch.rand(N) * 1e-8
+                # Noise at 1e-3: small enough not to override age-bucket ordering
+                # (min gap between consecutive age buckets ~1/(n*(n+1)) > 0.002 for n<=20),
+                # but large enough that each layer independently reorders tokens within
+                # the same age group — recovering the per-layer diversity that random gets
+                # for free. Without this, synchronized ages across layers cause identical
+                # drops everywhere, which hurts retention vs random (reviewer feedback).
+                importance += torch.rand(N) * 1e-3
                 return importance
             return torch.rand(N)
 

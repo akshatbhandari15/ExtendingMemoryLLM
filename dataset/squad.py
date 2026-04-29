@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import json
 import os
+from transformers import AutoTokenizer
 
 
 class SQuADDataset(Dataset):
@@ -22,14 +23,14 @@ class SQuADDataset(Dataset):
             self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
             self.tokenizer.pad_token = self.tokenizer.eos_token
         elif tokenizer == 'llama':
-            from transformers import LlamaTokenizer
+            from transformers import AutoTokenizer
 
-            # debug:
             if tokenizer_path is None:
-                self.tokenizer = LlamaTokenizer.from_pretrained("openlm-research/open_llama_3b_v2")
+                self.tokenizer = AutoTokenizer.from_pretrained("openlm-research/open_llama_3b_v2")
             else:
-                self.tokenizer = LlamaTokenizer.from_pretrained(tokenizer_path)
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
         else:
             # raise ValueError("tokenizer must be one of ['gpt2', 'llama']")
@@ -40,14 +41,30 @@ class SQuADDataset(Dataset):
 
         # load unrelated contexts:
         if num_unrelated_contexts > 0:
-            with open(filename.replace("dev", "train"), 'r') as file:
-                raw_data_train = json.load(file)['data']
+            train_path = filename.replace("dev", "train")
+            if os.path.exists(train_path):
+                with open(train_path, 'r') as file:
+                    raw_data_train = json.load(file)['data']
+                source_entries = raw_data_train
+            else:
+                # No train file: use dev contexts not in the eval index set
+                eval_indices_set = set(indices[:num].tolist() if (num is not None and num < len(indices)) else indices.tolist())
+                source_entries = []
+                qa_idx = 0
+                for entry in raw_data:
+                    for paragraph in entry['paragraphs']:
+                        for qa in paragraph['qas']:
+                            if qa['is_impossible']:
+                                continue
+                            if qa['answers'] and qa['answers'][0]['text']:
+                                if qa_idx not in eval_indices_set:
+                                    source_entries.append({'paragraphs': [{'context': paragraph['context']}]})
+                                qa_idx += 1
             self.unrelated_contexts = []
             flag = False
-            for entry in raw_data_train:
+            for entry in source_entries:
                 for paragraph in entry['paragraphs']:
                     context = paragraph['context']
-                    # make sure every context is long enough
                     if self.unrelated_contexts == []:
                         self.unrelated_contexts.append(context)
                         continue

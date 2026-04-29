@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from transformers import LlamaTokenizer
+from transformers import AutoTokenizer
 
 from modeling_memoryllm_strategies import MemoryLLMWithStrategies
 from dataset.nq import NQDataset
@@ -86,7 +86,7 @@ def collate_fn(data, tokenizer, max_length, num_tokens, padding="longest"):
 
     ctx   = tok(contexts,  512,        padding)
     quest = tok(questions, max_length, "longest")
-    ans   = tok([a + "</s>" for a in answers], max_length, "longest")
+    ans   = tok(list(answers), max_length, "longest")
 
     # unrelated_contexts shape: (batch, nuc) -> transpose to (nuc, batch)
     unrelated = np.array(unrelated_contexts).transpose().tolist()
@@ -132,12 +132,18 @@ def build_dataloader(dataset_name, model_path, nuc, num_samples, num_tokens, tok
 # Eval loop
 # ---------------------------------------------------------------------------
 
+def _normalize(s):
+    """SQuAD-style: drop EOS markers, lowercase, strip punct, collapse whitespace."""
+    import re, string
+    s = s.replace("</s>", "").replace("<|end_of_text|>", "")
+    s = s.lower()
+    s = "".join(c for c in s if c not in string.punctuation)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def exact_hit(predictions, targets):
-    """Fraction of predictions that contain the gold answer as a substring."""
-    hits = sum(
-        t.replace("</s>", "").strip() in p
-        for p, t in zip(predictions, targets)
-    )
+    """Fraction of predictions that contain the gold answer (normalized substring)."""
+    hits = sum(_normalize(t) in _normalize(p) for p, t in zip(predictions, targets))
     return hits / max(len(predictions), 1)
 
 
@@ -153,6 +159,11 @@ def run_retention_eval(model, tokenizer, dataloader, nuc, device):
     """
     model.eval()
 
+    # Snapshot the pretrained memory so we can restore it before each example.
+    # Resetting to zeros wipes 49/50 of the memory pool (inject_memory only
+    # rewrites one block of num_tokens), which destroys retention.
+    checkpoint_memory = model.memory.data.detach().clone()
+
     step_preds = {f"step_{i}": [] for i in range(nuc + 1)}
     step_tgts  = []
 
@@ -162,8 +173,8 @@ def run_retention_eval(model, tokenizer, dataloader, nuc, device):
             ctx_ids, ctx_mask, q_ids, q_mask, a_ids, _a_mask = batch[:6]
             unrel = batch[6:]  # alternating: ids, mask for each distractor
 
-            # Reset memory for this example
-            model.memory.data = torch.zeros_like(model.memory.data)
+            # Reset memory to pretrained checkpoint state for this example
+            model.memory.data.copy_(checkpoint_memory)
 
             # Injection sequence: target first, then distractors
             seq_ids   = [ctx_ids]  + [unrel[i * 2]     for i in range(nuc)]
@@ -237,7 +248,7 @@ def run_strategy(strategy, model, tokenizer, args, device):
     accs, per_example = run_retention_eval(model, tokenizer, dataloader, args.nuc, device)
     elapsed = time.time() - t0
 
-    auc = float(np.trapz(accs))
+    auc = float(np.trapezoid(accs))
 
     print(f"\n  Step accuracies : {[f'{a:.3f}' for a in accs]}")
     print(f"  AUC             : {auc:.4f}")
@@ -280,7 +291,9 @@ def main():
     print(f"Loading {args.model} ...")
     model = MemoryLLMWithStrategies.from_pretrained(args.model).to(device).to(dtype)
     model.eval()
-    tokenizer = LlamaTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     print(f"Model loaded — device: {device}, dtype: {args.dtype}")
 
     for strategy in strategies:

@@ -1555,14 +1555,16 @@ class MemoryLLM(LlamaForCausalLM):
                 get_peft_model(self.model, peft_config)
                 if config.add_decoder_lora:
                     get_peft_model(self.model, peft_config, adapter_name="decoder_adapter")
-            except AttributeError:
-                # Newer peft versions expect prepare_inputs_for_generation on the
-                # wrapped model. For inference with pretrained checkpoints (where
-                # LoRA weights are already merged), we can skip LoRA wrapping.
+            except AttributeError as e:
+                # peft/transformers version drift. The checkpoint ships LoRA
+                # adapter weights as separate keys — they are NOT pre-merged,
+                # so skipping wrapping silently DROPS them and kills retention.
                 import warnings
                 warnings.warn(
-                    "Skipping LoRA wrapping due to peft version incompatibility. "
-                    "This is fine for inference with pretrained checkpoints."
+                    f"LoRA wrapping FAILED: {type(e).__name__}: {e}. "
+                    f"Pin transformers==4.48.2 peft==0.10.0 to fix. "
+                    f"Proceeding without decoder_adapter — retention numbers "
+                    f"will be near zero."
                 )
 
 
