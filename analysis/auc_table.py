@@ -24,12 +24,14 @@ def main():
     p.add_argument("--results_dir", default="results")
     p.add_argument("--nuc", type=int, default=20)
     p.add_argument("--out", default="results/auc_summary.csv")
+    p.add_argument("--stem_suffix", default="",
+                   help="Suffix between nuc{N} and .json, e.g. '_perlayer'")
     args = p.parse_args()
 
     rows = []
     for ds in DATASETS:
         for strat in STRATEGIES:
-            path = os.path.join(args.results_dir, f"{ds}_{strat}_nuc{args.nuc}.json")
+            path = os.path.join(args.results_dir, f"{ds}_{strat}_nuc{args.nuc}{args.stem_suffix}.json")
             if not os.path.exists(path):
                 print(f"  [skip] {path} (missing)")
                 continue

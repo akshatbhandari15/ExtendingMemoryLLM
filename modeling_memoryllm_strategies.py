@@ -159,21 +159,19 @@ class MemoryLLMWithStrategies(MemoryLLM):
         elif self._drop_strategy == "age":
             if layer_idx is not None and layer_idx < len(self._token_ages):
                 ages = self._token_ages[layer_idx][:N]
-                importance = torch.zeros(N)
-                for i in range(N):
-                    if ages[i] <= self._age_protection_window:
-                        # Recently injected: high importance (protected)
-                        importance[i] = float('inf')
-                    else:
-                        # Older tokens: importance decreases with age
-                        # Inverse age = younger tokens more important
-                        importance[i] = 1.0 / (ages[i] + 1)
-                # Noise at 1e-3: small enough not to override age-bucket ordering
-                # (min gap between consecutive age buckets ~1/(n*(n+1)) > 0.002 for n<=20),
-                # but large enough that each layer independently reorders tokens within
-                # the same age group — recovering the per-layer diversity that random gets
-                # for free. Without this, synchronized ages across layers cause identical
-                # drops everywhere, which hurts retention vs random (reviewer feedback).
+                # Vectorized: protected tokens get +inf, older tokens get 1/(age+1).
+                # Equivalent to the prior per-token Python loop but ~Nx faster, which
+                # matters once per-layer mode calls drop_memory 32x per step.
+                imp_np = np.where(
+                    ages <= self._age_protection_window,
+                    np.inf,
+                    1.0 / (ages.astype(np.float32) + 1.0),
+                ).astype(np.float32)
+                importance = torch.from_numpy(imp_np)
+                # Noise at 1e-3: see commit f186d17. Small enough not to cross age-bucket
+                # boundaries, large enough to give per-layer tie-break diversity within a
+                # bucket — without this, synchronized ages produce identical drops at every
+                # layer and retention collapses below random.
                 importance += torch.rand(N) * 1e-3
                 return importance
             return torch.rand(N)

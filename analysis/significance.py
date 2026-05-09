@@ -97,6 +97,8 @@ def main():
     p.add_argument("--bootstrap_iters", type=int, default=2000)
     p.add_argument("--perm_iters", type=int, default=5000)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--stem_suffix", default="",
+                   help="Suffix between nuc{N} and .json, e.g. '_perlayer'")
     args = p.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -107,7 +109,7 @@ def main():
         hits = {}
         aucs = {}
         for strat in STRATEGIES:
-            path = os.path.join(args.results_dir, f"{ds}_{strat}_nuc{args.nuc}.json")
+            path = os.path.join(args.results_dir, f"{ds}_{strat}_nuc{args.nuc}{args.stem_suffix}.json")
             if not os.path.exists(path):
                 print(f"  [skip] {path}")
                 continue
