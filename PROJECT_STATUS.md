@@ -1,4 +1,24 @@
-# Project status — 2026-04-28
+# Project status — 2026-05-12
+
+## Latest session (2026-05-12) — pipeline re-verified, cleared for per-layer canonical runs
+
+Branch `ketaki` at commit `add22ca`. Three fixes shipped today (commits `68ce9ea`, `b31f6ee`, `add22ca` — full forensics in `PROGRESS_LOG.md` "Session 2026-05-12"):
+
+- **Bug 6 (caught + fixed):** `attn_implementation` was never passed to `from_pretrained`, so HF defaulted to sdpa even when flash-attn was installed. Both drivers now auto-detect flash-attn and print which implementation is active.
+- **Decision:** drop flash-attn from the Colab setup path. Current Colab (torch 2.10 + cu128 + py3.12) has no compatible prebuilt wheel; source builds are unreliable. sdpa fallback is ~1.3–1.5× slower at batch=1, fine.
+- **Bug 7 (caught + fixed):** `np.trapezoid` (numpy 2.0) didn't exist on pinned `numpy==1.26.4`. Replaced with `getattr(np, "trapezoid", np.trapz)` across 5 files.
+
+**Pipeline state verified on fresh Colab A100:**
+- Pins load correctly: `torch 2.5.1+cu124 / transformers 4.48.2 / peft 0.10.0 / accelerate 1.2.0`.
+- LoRA loads cleanly: `missing_keys: 0, unexpected_keys: 0` (peft pin still holding, no Bug 2 regression).
+- Smoke test (`--drop_per_layer --log_dropped`) produces both result JSON + drop-log JSON.
+- Sanity passed: `normal − zeroed = +0.567` (>> 0.10 threshold).
+
+**Cleared for Phase A (per-layer matrix run on SQuAD + NQ).** See "What's next" at the bottom of this doc.
+
+---
+
+# Earlier snapshot — 2026-04-28
 
 ## What this project is
 Columbia COMS 6998 final project. Fork of MemoryLLM (ICML 2024), which augments Llama-3-8B with a 1.67B-parameter memory pool (50 blocks × 256 tokens × 32 layers × 4096 dim). The paper drops memory tokens at random; we replace that with four importance-aware strategies and measure knowledge retention as a function of distractor injections.
@@ -117,3 +137,40 @@ Run on SQuAD, N=30, nuc=5:
 ### Skip
 
 Fisher (#19, too risky), Hybrid (#34, too risky), full pool ablation matrix (too expensive), N=200 re-runs (marginal payoff).
+
+---
+
+## What's next (as of 2026-05-12)
+
+Ordered checklist — full detail in `CODEBASE_REVIEW.md §7`.
+
+### Phase A — GPU runs (~10–13 hr total)
+- [ ] **A1.** Backup `results/` to Drive (1 min).
+- [ ] **A2.** SQuAD per-layer matrix: `python run_eval.py --strategy all --dataset squad --nuc 20 --num_samples 100 --drop_per_layer --log_dropped --output_dir results/perlayer --resume` (~5–7 hr).
+- [ ] **A3.** NQ per-layer matrix (same command, `--dataset nq`, ~5–7 hr; can be a fresh Colab session).
+- [ ] **A4.** Sync `results/perlayer/` (8 JSONs + 8 drop logs) to Drive.
+
+### Phase B — Analysis (no GPU, ~30 min)
+- [ ] **B1.** `analysis/auc_table.py --results_dir results/perlayer --out results/auc_perlayer.csv` — canonical AUC table.
+- [ ] **B2.** `analysis/significance.py --results_dir results/perlayer --out results/significance_perlayer.csv --bootstrap_iters 5000 --perm_iters 10000`.
+- [ ] **B3.** `analysis/dropped_indices.py --files "results/perlayer/*_dropped.json" --out results/jaccard_summary.csv` — direct answer to TA Q2 (Layer-Jaccard).
+- [ ] **B4.** `analysis/plot_retention.py --results_dir results/perlayer --out figures/retention_perlayer` — regenerate curves.
+- [ ] **B5.** Position-of-answer histogram (new ~40 LOC script; not yet written) — answers TA Q3 + Tushar #2.
+
+### Phase C — Writeup hygiene
+- [ ] **C1.** Fix "orthogonal" → "most dissimilar" in methods text.
+- [ ] **C2.** Normalize AUC to [0, 1] in CSVs + figure axes.
+- [ ] **C3.** Update this `PROJECT_STATUS.md` with per-layer headline numbers + train/test-mismatch finding + 3-paragraph TA Q1/Q2/Q3 answers.
+
+### Phase D — Optional
+- [ ] **D1.** N=300 confirmation for `age` + `random` per-layer only (~6 hr/dataset) if N=100 trends are directional but not Bonferroni-significant.
+
+### Phase E — Report (parallelizable with A)
+- [ ] **E1.** Intro + Related Work (#26).
+- [ ] **E2.** Methods (#27) — includes C1 wording fix + 3B-vs-8B paragraph.
+- [ ] **E3.** Experiments + Results (#28) — after Phase B.
+- [ ] **E4.** Discussion (#29).
+- [ ] **E5.** Abstract (#30).
+- [ ] **E6.** Slides (#16/#17/#18).
+
+**Critical path:** A1 → A2 → A3 → B1/B2/B3 → C3 → E2 → E3 → E4 → E5.

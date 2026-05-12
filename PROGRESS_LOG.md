@@ -299,3 +299,77 @@ Run with defaults; for paper-final numbers bump iters: `python analysis/signific
 - [ ] Draft #26 Intro/Related Work and #27 Methods *now* while runs go (no numbers needed)
 - [ ] After analysis: #28 Experiments, #29 Discussion, #30 Abstract
 - [ ] Slides #16/#17/#18
+
+---
+
+## Session 2026-05-12 — flash-attn wiring + numpy fixes + pipeline re-verify
+
+Goal: prep the codebase for the per-layer canonical matrix runs (CODEBASE_REVIEW §7). Found three blockers on a fresh Colab session, fixed all three, re-verified the full pipeline.
+
+### Bug 6 — `attn_implementation` was never requested at model load
+
+`run_eval.py` and `run_sanity.py` both called `MemoryLLMWithStrategies.from_pretrained(args.model)` with no `attn_implementation` kwarg, so HF defaulted to `sdpa` even if flash-attn was installed. The model code (`modeling_memoryllm.py:710` `_supports_flash_attn_2 = True`, plus `LlamaFlashAttention2` at line 388 and the entry in `LLAMA_ATTENTION_CLASSES` at line 601) fully supports flash-attn — the driver just wasn't asking for it. Prior "flash-attn installed but unused" symptom on Colab is now explained.
+
+**Fix (commit `68ce9ea`):** both drivers now do `try: import flash_attn` → request `flash_attention_2` if importable, else fall back to `sdpa`. Both print `Using attn_implementation=<impl>` so the active choice is visible. Also threads `torch_dtype=dtype` into `from_pretrained` instead of `.to(dtype)` after the fact, which is the HF-recommended order.
+
+### Decision — drop flash-attn from the setup path on Colab
+
+Colab now ships `torch 2.10.0 + cu128 + py3.12 + cxx11_abi=True`. flash-attn 2.5.4 (released Feb 2024) has no prebuilt wheel for this combo and source builds against torch 2.10 are unreliable — a build attempt this session got 5+ min in before being cancelled. Decision: don't install flash-attn on Colab; let the eval drivers fall back to sdpa. The drop is ~1.3–1.5× slowdown at batch=1 inference, which is acceptable.
+
+**Fix (commit `68ce9ea`):** `scripts/setup.sh` now installs the pinned `torch==2.5.1 transformers==4.48.2 peft==0.10.0 accelerate==1.2.0` stack explicitly and skips flash-attn entirely, with a comment block explaining why for future-us.
+
+### Bug 7 — `np.trapezoid` doesn't exist on numpy 1.26
+
+`np.trapezoid` was added in numpy 2.0. Our pinned `numpy==1.26.4` only has `np.trapz` (the older name; still works on numpy 2.x with a deprecation warning). Crash in `run_eval.py:273`, then again in `run_sanity.py:195` after first patch missed the second site.
+
+**Fix (commits `b31f6ee`, `add22ca`):** replaced `np.trapezoid(...)` with `getattr(np, "trapezoid", np.trapz)(...)` across 5 files — `run_eval.py`, `run_sanity.py`, `analysis/plot_retention.py`, `analysis/significance.py`, `analysis/rescore.py`. Works on both numpy 1.x and 2.x.
+
+### Re-verified pipeline state (post-fixes, branch `ketaki` at `add22ca`)
+
+On a fresh Colab A100 session:
+
+**Pin check** (after `bash scripts/setup.sh --no-data` + kernel restart):
+```
+torch        2.5.1+cu124
+transformers 4.48.2
+peft         0.10.0
+accelerate   1.2.0
+cuda         12.4 gpu True
+```
+All pins correct. peft pin holding means LoRA decoder adapters load cleanly — no recurrence of Bug 2.
+
+**Smoke test** — `run_eval.py --strategy random --dataset squad --nuc 3 --num_samples 5 --drop_per_layer --log_dropped`:
+- `Using attn_implementation=sdpa` printed ✓
+- `drop_per_layer: True` printed ✓
+- 25 sec wall time for 5 examples × 3 distractors → ~5 sec per example-step
+- Both files produced: `squad_random_nuc3_perlayer.json` (results) + `squad_random_nuc3_perlayer_dropped.json` (drop log, 20 entries) ✓
+- Implies ~5 hr per strategy at full N=100, nuc=20 → ~5–7 hr per dataset for all 4 strategies
+
+**Sanity** — `run_sanity.py --num_samples 30 --nuc 5`:
+| Condition | step-0 | step-5 | AUC |
+|---|---|---|---|
+| normal | **0.567** | 0.467 | 2.450 |
+| zeroed | 0.000 | 0.000 | 0.000 |
+| scrambled | 0.633 | 0.400 | 2.617 |
+
+LOAD REPORT: `missing_keys: 0, unexpected_keys: 0, mismatched_keys: 0`, `initialized: 1`, `memory.std=0.336` — identical to the historical pass state from 2026-04-28.
+
+`normal − zeroed = +0.567` (>> 0.10 threshold). **PASS.** Pipeline cleared for the long per-layer matrix runs.
+
+Note: step-0 normal is 0.567 here vs 0.667 historically. Difference is within sampling noise at N=30 (different seed or just luck of the draw) — the gap is what matters and it's massive.
+
+### Today's commits (branch `ketaki`)
+
+| Commit | What |
+|---|---|
+| `68ce9ea` | Wire `attn_implementation` into `from_pretrained` in `run_eval.py` / `run_sanity.py` with flash-attn → sdpa fallback. Pin deps explicitly in `setup.sh` and drop flash-attn from install path. |
+| `b31f6ee` | `np.trapezoid` → `getattr(np, "trapezoid", np.trapz)` in `run_eval.py`, `analysis/plot_retention.py`, `analysis/significance.py`, `analysis/rescore.py`. |
+| `add22ca` | Same fix in `run_sanity.py` (missed in `b31f6ee`). |
+
+### What's next (carries over from CODEBASE_REVIEW §7)
+
+- **Phase A:** SQuAD then NQ per-layer matrix runs (`--strategy all --drop_per_layer --log_dropped --output_dir results/perlayer --resume`). ~5–7 hr each on A100. Sync to Drive periodically.
+- **Phase B:** `auc_table.py`, `significance.py`, `dropped_indices.py` on `results/perlayer/` → canonical AUC + significance + Layer-Jaccard tables. Plus regenerate retention figures.
+- **Phase C:** writeup hygiene — surprise "orthogonal → most dissimilar", AUC normalize to [0, 1], update `PROJECT_STATUS.md` with per-layer numbers + train/test-mismatch finding.
+- **Phase D (optional):** N=300 confirmation for `age` + `random` if N=100 trends aren't Bonferroni-significant.
+- **Phase E:** report writeup — Methods + Intro can be drafted now in parallel with Phase A; Experiments/Discussion after Phase B lands.

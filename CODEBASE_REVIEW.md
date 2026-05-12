@@ -1,6 +1,7 @@
 # ExtendingMemoryLLM — Codebase Review & TA-Feedback Notes
 
 **Review date:** 2026-05-04.
+**Last status check:** 2026-05-12 — pipeline re-verified on fresh Colab A100, sanity passes (normal−zeroed=+0.567), cleared for Phase A per-layer canonical runs. See `PROGRESS_LOG.md` "Session 2026-05-12" for the three fixes shipped that day (Bugs 6 + 7, flash-attn decision).
 **Scope:** end-to-end read of model code, eval driver, datasets, analysis scripts, results, and progress docs. No code changes — review only, plus a written plan to address TA's feedback.
 
 ---
