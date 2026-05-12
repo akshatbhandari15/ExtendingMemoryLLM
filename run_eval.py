@@ -322,7 +322,15 @@ def main():
     strategies = STRATEGIES if args.strategy == "all" else [args.strategy]
 
     print(f"Loading {args.model} ...")
-    model = MemoryLLMWithStrategies.from_pretrained(args.model).to(device).to(dtype)
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        attn_impl = "sdpa"
+    print(f"Using attn_implementation={attn_impl}")
+    model = MemoryLLMWithStrategies.from_pretrained(
+        args.model, torch_dtype=dtype, attn_implementation=attn_impl,
+    ).to(device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:

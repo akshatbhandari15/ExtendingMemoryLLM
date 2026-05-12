@@ -113,10 +113,17 @@ def main():
     dtype  = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
 
     print(f"Loading {args.model} ...")
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        attn_impl = "sdpa"
+    print(f"Using attn_implementation={attn_impl}")
     model, load_info = MemoryLLMWithStrategies.from_pretrained(
         args.model, output_loading_info=True,
+        torch_dtype=dtype, attn_implementation=attn_impl,
     )
-    model = model.to(device).to(dtype)
+    model = model.to(device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
