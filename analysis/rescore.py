@@ -51,7 +51,7 @@ def rescore_one(path: str, dry_run: bool = False) -> dict:
             M[i, s] = hit(ex["step_preds"][f"step_{s}"], ex["target"])
 
     new_accs = M.mean(0).tolist()
-    new_auc = float(np.trapezoid(new_accs))
+    new_auc = float(getattr(np, "trapezoid", np.trapz)(new_accs))
     old_accs = d["accuracy_per_step"]
     old_auc = d["auc"]
 

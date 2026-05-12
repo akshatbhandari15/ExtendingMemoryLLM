@@ -270,7 +270,7 @@ def run_strategy(strategy, model, tokenizer, args, device):
     accs, per_example = run_retention_eval(model, tokenizer, dataloader, args.nuc, device)
     elapsed = time.time() - t0
 
-    auc = float(np.trapezoid(accs))
+    auc = float(getattr(np, "trapezoid", np.trapz)(accs))
 
     print(f"\n  Step accuracies : {[f'{a:.3f}' for a in accs]}")
     print(f"  AUC             : {auc:.4f}")

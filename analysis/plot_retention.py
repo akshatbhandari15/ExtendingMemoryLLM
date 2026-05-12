@@ -74,7 +74,7 @@ def bootstrap_band(hit_matrix, n_iters, rng):
 
 
 def auc_of(curve):
-    return float(np.trapezoid(curve))
+    return float(getattr(np, "trapezoid", np.trapz)(curve))
 
 
 def plot_dataset(ax, dataset, results_dir, nuc, draw_ci, n_iters, rng):

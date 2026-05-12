@@ -53,7 +53,7 @@ def per_example_hit_matrix(per_example, nuc):
 
 def auc_of_acc_curve(acc_curve):
     """np.trapezoid over the curve (matches what run_eval saves)."""
-    return float(np.trapezoid(acc_curve))
+    return float(getattr(np, "trapezoid", np.trapz)(acc_curve))
 
 
 def bootstrap_auc_ci(hit_matrix, n_iters, rng):
