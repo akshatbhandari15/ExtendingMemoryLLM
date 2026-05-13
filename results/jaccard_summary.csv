@@ -1,0 +1,9 @@
+name,mode,layer_jaccard
+nq_age_nuc20,per_layer,0.945654586966242
+nq_attention_nuc20,per_layer,0.010117083315817068
+nq_random_nuc20,per_layer,0.010121570210931952
+nq_surprise_nuc20,per_layer,0.6021571921528817
+squad_age_nuc20,per_layer,0.945654586966242
+squad_attention_nuc20,per_layer,0.010117083315817068
+squad_random_nuc20,per_layer,0.010121570210931952
+squad_surprise_nuc20,per_layer,0.6182930993319076

@@ -9,3 +9,5 @@ train/data/redpajama/documents
 train/data/redpajama/listings
 train/logs
 locals
+# Per-layer drop logs are 100+ MB each; keep in Drive backup, not git
+results/perlayer/*_dropped.json

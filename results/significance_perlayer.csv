@@ -1,0 +1,9 @@
+dataset,strategy,baseline,auc,auc_ci_lo,auc_ci_hi,delta_auc,p_value,p_bonf,n_pairs,sig
+squad,attention,random,7.63,6.225,9.07,-0.55,0.07199,0.21598,3,ns
+squad,age,random,8.46,7.0649,9.865,0.28,0.43816,1.0,3,ns
+squad,surprise,random,8.015,6.625,9.4601,-0.165,0.70483,1.0,3,ns
+squad,random,(self),8.18,6.8249,9.565,0.0,1.0,1.0,3,—
+nq,attention,random,1.63,0.985,2.385,-0.135,0.47365,1.0,3,ns
+nq,age,random,1.71,1.015,2.5201,-0.055,0.75702,1.0,3,ns
+nq,surprise,random,1.63,1.055,2.31,-0.135,0.60004,1.0,3,ns
+nq,random,(self),1.765,1.105,2.56,0.0,1.0,1.0,3,—
