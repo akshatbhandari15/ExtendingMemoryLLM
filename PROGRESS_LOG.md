@@ -373,3 +373,43 @@ Note: step-0 normal is 0.567 here vs 0.667 historically. Difference is within sa
 - **Phase C:** writeup hygiene — surprise "orthogonal → most dissimilar", AUC normalize to [0, 1], update `PROJECT_STATUS.md` with per-layer numbers + train/test-mismatch finding.
 - **Phase D (optional):** N=300 confirmation for `age` + `random` if N=100 trends aren't Bonferroni-significant.
 - **Phase E:** report writeup — Methods + Intro can be drafted now in parallel with Phase A; Experiments/Discussion after Phase B lands.
+
+---
+
+## Session 2026-05-12 evening — Phase A2 complete (SQuAD per-layer matrix)
+
+All 4 SQuAD strategies ran clean on Colab A100. **Total elapsed: 2.8 hr** (well under the 5–7 hr estimate — the `age` loop vectorisation from commit `2129691` paid off, all strategies now run at roughly the same per-step latency).
+
+### Per-layer SQuAD results (N=100, nuc=20, `drop_per_layer=True`, sdpa attention)
+
+| Strategy | Per-layer AUC | Step-0 | Step-20 | Elapsed | Prior shared-drop AUC | Δ (perlayer − shared) |
+|---|---:|---:|---:|---:|---:|---:|
+| random | **8.18** | 0.540 | 0.380 | 2502 s | 8.01 | **+0.17** |
+| attention | 7.63 | 0.490 | 0.350 | 2530 s | 7.68 | −0.05 |
+| age | **8.46** | 0.520 | 0.380 | 2451 s | 8.47 | −0.01 |
+| surprise | 8.015 | 0.430 | 0.360 | 2689 s | 7.75 | **+0.27** |
+
+**ΔAUC vs random in per-layer mode:** age +0.28, surprise −0.165, attention −0.55.
+
+### Initial read (full analysis comes in Phase B)
+
+The TA's per-layer-independence hypothesis appears supported on first inspection:
+- **Random gains the most from per-layer mode** (+0.17 AUC moving from shared → per-layer). It's the strategy with the biggest *structural* benefit from layer independence (`torch.rand(N)` is genuinely resampled per layer; the other strategies' per-layer divergence is more limited).
+- **Surprise also gains substantially** (+0.27) — consistent with `delta_memory[layer_idx]` actually differing per layer, so per-layer mode produces real per-layer drop diversity for surprise.
+- **Age is flat** (−0.01) — predicted by the 2026-04-21 reviewer analysis: `_token_ages` are synchronised across layers, only the `1e-3` tie-break noise (from commit `f186d17`) produces per-layer divergence. The flatness is empirical confirmation that age's drops were already nearly the same in both modes.
+- **Attention got slightly worse in per-layer mode** (−0.05) — small enough to be noise, but interesting. Phase B Layer-Jaccard will tell us whether the per-layer attention EMAs actually diverge or whether they cluster around the same low-attention tokens regardless.
+
+**Ranking in per-layer mode (canonical):** age > random > surprise > attention. Attention is the only strategy that now underperforms random.
+
+### Operational notes
+
+- One benign warning surfaced during the `attention` strategy: `LlamaSdpaAttention ... does not support output_attentions=True. Falling back to manual attention.` That's HF auto-switching to eager attention only when the attention strategy needs `output_attentions=True` to update the EMA. Not a bug, doesn't affect correctness. The other three strategies stayed on sdpa for the whole run.
+- Drop-log files: 2100 entries each = 100 examples × 21 steps (target + 20 distractors). Correct.
+- All 8 files (4 results JSONs + 4 drop logs) written to `results/perlayer/`. Backup to `MyDrive/ExtendingMemoryLLM/perlayer/` is the next step before launching Phase A3 (NQ).
+
+### Updated next actions
+
+- [ ] **Backup** `results/perlayer/*` to Drive (1 min, do before A3).
+- [ ] **Phase A3:** NQ per-layer matrix run (`--dataset nq`, same flags). ETA ~2.8–3 hr.
+- [ ] **Phase B1–B5** after A3 lands: AUC table, significance, Layer-Jaccard, retention plots, position-of-answer histogram (B5 script still to be written).
+- [ ] **Phase E1/E2 (Intro + Methods)** can be drafted in parallel with A3 — no GPU dependency.

@@ -1,6 +1,29 @@
 # Project status — 2026-05-12
 
-## Latest session (2026-05-12) — pipeline re-verified, cleared for per-layer canonical runs
+## Latest update (2026-05-12 evening) — SQuAD per-layer matrix done
+
+**Phase A2 complete.** All 4 SQuAD strategies ran in per-layer mode (matches the checkpoint's training condition). Total wall time **2.8 hr** on A100 — well under the 5–7 hr estimate thanks to the `age` vectorisation.
+
+### Per-layer SQuAD AUCs (N=100, nuc=20, canonical numbers)
+
+| Strategy | Per-layer AUC | Prior shared-drop AUC | Δ (perlayer − shared) | ΔAUC vs random (perlayer) |
+|---|---:|---:|---:|---:|
+| random    | **8.18** | 8.01 | +0.17 | — |
+| attention | 7.63  | 7.68 | −0.05 | −0.55 |
+| age       | **8.46** | 8.47 | −0.01 | +0.28 |
+| surprise  | 8.015 | 7.75 | +0.27 | −0.165 |
+
+**Per-layer ranking:** age > random > surprise > attention.
+
+**Initial read (full analysis pending Phase B):** TA's per-layer-independence hypothesis appears supported. Random gains the most from per-layer mode (+0.17), surprise also gains substantially (+0.27), age is flat (predicted — ages sync across layers), attention barely moves. See `PROGRESS_LOG.md` "Session 2026-05-12 evening" for the detailed read.
+
+**Operational note:** during the `attention` strategy, HF auto-falls-back from sdpa to eager attention (sdpa doesn't support `output_attentions=True` which the strategy needs for EMA updates). Benign, expected, no correctness impact.
+
+**Still to do:** Phase A3 (NQ), then Phase B (analysis), then Phase C (writeup hygiene + this doc's headline numbers update).
+
+---
+
+## Earlier (2026-05-12 afternoon) — pipeline re-verified, cleared for per-layer canonical runs
 
 Branch `ketaki` at commit `add22ca`. Three fixes shipped today (commits `68ce9ea`, `b31f6ee`, `add22ca` — full forensics in `PROGRESS_LOG.md` "Session 2026-05-12"):
 
@@ -145,10 +168,10 @@ Fisher (#19, too risky), Hybrid (#34, too risky), full pool ablation matrix (too
 Ordered checklist — full detail in `CODEBASE_REVIEW.md §7`.
 
 ### Phase A — GPU runs (~10–13 hr total)
-- [ ] **A1.** Backup `results/` to Drive (1 min).
-- [ ] **A2.** SQuAD per-layer matrix: `python run_eval.py --strategy all --dataset squad --nuc 20 --num_samples 100 --drop_per_layer --log_dropped --output_dir results/perlayer --resume` (~5–7 hr).
-- [ ] **A3.** NQ per-layer matrix (same command, `--dataset nq`, ~5–7 hr; can be a fresh Colab session).
-- [ ] **A4.** Sync `results/perlayer/` (8 JSONs + 8 drop logs) to Drive.
+- [x] **A1.** Backup `results/` to Drive (1 min). _Done 2026-05-12._
+- [x] **A2.** SQuAD per-layer matrix (4 JSONs + 4 drop logs, 2.8 hr). _Done 2026-05-12 evening._
+- [ ] **A3.** NQ per-layer matrix (same command, `--dataset nq`, ETA ~2.8–3 hr).
+- [ ] **A4.** Sync `results/perlayer/` (8 JSONs + 8 drop logs) to Drive after A3.
 
 ### Phase B — Analysis (no GPU, ~30 min)
 - [ ] **B1.** `analysis/auc_table.py --results_dir results/perlayer --out results/auc_perlayer.csv` — canonical AUC table.
