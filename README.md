@@ -65,7 +65,7 @@ Full numbers: `results/{auc_perlayer,significance_perlayer,jaccard_summary,posit
 
 ## Quick start
 
-### 1. Clone the `ketaki` branch (active development; `main` mirrors it)
+### 1. Clone
 
 ```bash
 git clone https://github.com/akshatbhandari15/ExtendingMemoryLLM.git
