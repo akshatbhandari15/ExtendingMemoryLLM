@@ -413,3 +413,93 @@ The TA's per-layer-independence hypothesis appears supported on first inspection
 - [ ] **Phase A3:** NQ per-layer matrix run (`--dataset nq`, same flags). ETA ~2.8–3 hr.
 - [ ] **Phase B1–B5** after A3 lands: AUC table, significance, Layer-Jaccard, retention plots, position-of-answer histogram (B5 script still to be written).
 - [ ] **Phase E1/E2 (Intro + Methods)** can be drafted in parallel with A3 — no GPU dependency.
+
+---
+
+## Session 2026-05-13 — Phase A3 (NQ per-layer) + Phase B (analysis) complete
+
+### NQ per-layer matrix (Phase A3)
+
+All 4 strategies on NQ A100, 2.9 hr total wall time. Story is qualitatively different from SQuAD: random *gains the most* from per-layer mode (+0.215 vs prior shared-drop) and overtakes every importance strategy. Importance strategies all got *worse* in per-layer mode. Direct support for the TA's per-layer-independence hypothesis: random's structural benefit from independent dropping is amplified, while importance strategies that effectively synchronise across layers don't get the same benefit.
+
+| Strategy | NQ per-layer AUC | NQ shared-drop AUC | Δ |
+|---|---:|---:|---:|
+| random | **1.765** | 1.55 | **+0.215** |
+| attention | 1.63 | 1.78 | −0.150 |
+| age | 1.71 | 1.875 | −0.165 |
+| surprise | 1.63 | 1.915 | −0.285 |
+
+### Phase B — all five analyses
+
+**B1 AUC table** (`results/auc_perlayer.csv`): canonical numbers, both datasets.
+
+**B2 Significance** (`results/significance_perlayer.csv`, 5000 bootstrap + 10000 perm iters): nothing clears Bonferroni. SQuAD `attention vs random` is closest (uncorrected p=0.072, ΔAUC=−0.55 — attention meaningfully worse). All other deltas have p > 0.4. Expected at N=100 with bootstrap CIs of ±0.7–1.4 on AUC.
+
+**B3 Layer-Jaccard** (`results/jaccard_summary.csv`): the direct TA Q2 answer.
+- random: 0.01 (fully decorrelated — predicted ~0.02)
+- attention: 0.01 (fully decorrelated — surprise; we'd predicted moderate)
+- surprise: 0.60 (moderate — matches prediction)
+- age: 0.95 (synchronized — matches prediction)
+
+The Jaccard rank order is monotonic with how much per-layer mode hurts each strategy (random hurts least, age hurts most). Layer-Jaccard explains correlation across layers, not absolute performance.
+
+**B4 Retention figures** (`figures/retention_{squad,nq,combined}.png`): per-layer curves overlaid by strategy.
+
+**B5 Position-of-answer histogram** (`analysis/position_bias.py`, `figures/position_bias.png`, `results/position_bias.csv`): tests whether `age`'s SQuAD win is just recency bias of where SQuAD places answers. Result is clean — age wins on **mid-position** answers (gap +0.12 vs random), not late. If it were recency bias, late would dominate. Win is genuine.
+
+### Operational issues hit + resolved
+
+- **Drop logs are 100+ MB each in per-layer mode.** Initial push to GitHub failed with 408 timeout (85 MiB payload), then with pre-receive hook rejection (files >100 MB). Resolution: gitignored `results/perlayer/*_dropped.json` entirely; they live on Drive only. The lightweight result JSONs (per_example dumps + accs + AUC, ~2–5 KB each) and the four analysis CSVs went to GitHub instead. Total GitHub payload: 247 KiB.
+- **NQ jsonl was truncated to 1.9 GB on Drive** (should be 6.4 GB). Caught by sizes-don't-match check before launching NQ. Re-downloaded fresh from HF (`YuWangX/KnowledgeRetention`), confirmed 6.4 GB, re-synced to Drive. Smoke test before the full run produced non-zero accuracies (0.4 / 0.6 / 0.4 / 0.4), confirming Bug 4 fix still held.
+- **Analysis scripts needed `--stem_suffix _perlayer`** to find `*_perlayer.json` files (the flag was already in the scripts but I'd given the wrong CLI invocation initially).
+
+### Today's commits
+
+| Commit | What |
+|---|---|
+| `a41207c` | Add `analysis/position_bias.py` (Phase B5 script) |
+| `938f6c6` | [RESULTS] Phase A+B: 8 per-layer JSONs + 4 analysis CSVs + figures (drop logs gitignored) |
+
+---
+
+## Session 2026-05-14 — five extra plots + canonical doc update
+
+### Five paper-quality plots (`analysis/extra_plots.py`)
+
+All built from existing JSONs/CSVs on disk; no GPU, no re-run.
+
+| File | Shows |
+|---|---|
+| `figures/p1_decay_overlay.png` | shared-drop (dashed) vs per-layer (solid) decay curves for every (dataset, strategy) — the visual TA Q1 answer |
+| `figures/p2_strategy_agreement.png` | pairwise Jaccard heatmap at step 20, one panel per dataset — shows random's distinctiveness |
+| `figures/p3_auc_ci_bars.png` | AUC bars with 95% bootstrap CIs, shared vs per-layer side by side, per dataset |
+| `figures/p4_robust_forgot_recovered.png` | per-strategy example breakdown: robust (right @0&@20) / recovered / forgot / never |
+| `figures/p5_layer_jaccard.png` | Layer-Jaccard horizontal bars by (strategy, dataset) |
+
+### New deeper insights extracted from per-example data
+
+1. SQuAD and NQ have qualitatively different decay profiles. SQuAD retains >65% of step-0 across 20 distractors; NQ half-lives within 6–15 steps.
+2. Surprise has the gentlest SQuAD decay (drop 0.07) but starts lowest (0.43 vs random 0.54). Stability profile distinct from absolute-accuracy profile.
+3. Attention and surprise on SQuAD have a "shock minimum" at steps 2–3 then recover; random and age decline monotonically. Importance signals need a few injections to stabilise.
+4. Random retains *different* examples than the importance strategies (step-20 Jaccard ~0.51 with each). Age and surprise agree on 0.68 of their retained examples. Random's contribution is structurally distinct.
+5. Attention is the most stable strategy on SQuAD (29 robust, 20 forgot, 6 recovered). Random is the highest-variance (28 forgot, 12 recovered).
+6. NQ "robust" counts are brutal — age has only 1 example correct at both step 0 and step 20 of 100. N=300 Phase D would meaningfully tighten NQ claims.
+
+### What's done overall (cumulative)
+
+- ✅ Phase A1–A4: per-layer matrix runs both datasets
+- ✅ Phase B1–B5: AUC table, significance, Layer-Jaccard, retention plots, position-bias
+- ✅ Phase P1–P5: five extra plots
+- ✅ Doc updates: PROJECT_STATUS.md + PROGRESS_LOG.md with canonical numbers and TA Q1/Q2/Q3 answers
+
+### What's next
+
+- [ ] **C1.** Fix "orthogonal" → "most dissimilar" in any draft writeup text.
+- [ ] **C2.** Normalize AUC by /20 for [0, 1] scale in CSVs + figures (paper hygiene).
+- [ ] **D1 (optional).** N=300 confirmation on NQ (`age` + `random` only) to firm up the noisier NQ ranking. ~6 hr A100.
+- [ ] **E1.** Intro + Related Work draft (no numbers needed, no blockers).
+- [ ] **E2.** Methods draft (includes the C1 wording fix + 3B-profiling/8B-eval paragraph).
+- [ ] **E3.** Experiments + Results — embed Phase A/B + P1–P5 outputs.
+- [ ] **E4.** Discussion — three findings + TA Q1/Q2/Q3 answers (text is essentially in PROJECT_STATUS.md, lift it).
+- [ ] **E5.** Abstract + final pass.
+- [ ] **E6.** Slides #16/#17/#18.
