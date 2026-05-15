@@ -113,10 +113,17 @@ def main():
     dtype  = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
 
     print(f"Loading {args.model} ...")
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        attn_impl = "sdpa"
+    print(f"Using attn_implementation={attn_impl}")
     model, load_info = MemoryLLMWithStrategies.from_pretrained(
         args.model, output_loading_info=True,
+        torch_dtype=dtype, attn_implementation=attn_impl,
     )
-    model = model.to(device).to(dtype)
+    model = model.to(device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
@@ -185,7 +192,7 @@ def main():
         results["accuracy_per_step_by_condition"][condition] = accs
         print(f"    step-0 acc         : {accs[0]:.3f}")
         print(f"    step-{args.nuc:<2} acc        : {accs[-1]:.3f}")
-        print(f"    AUC (trapz)        : {float(np.trapezoid(accs)):.3f}")
+        print(f"    AUC (trapz)        : {float(getattr(np, 'trapezoid', np.trapz)(accs)):.3f}")
 
     # Verdict
     normal0  = results["accuracy_per_step_by_condition"]["normal"][0]

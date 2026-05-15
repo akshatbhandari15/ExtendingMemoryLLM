@@ -19,8 +19,21 @@ for arg in "$@"; do
 done
 
 echo ">>> Installing Python dependencies..."
-pip install -q -r requirements_infer_only.txt
-pip install -q omegaconf scikit-learn pandas tqdm
+# Build prereqs must be present BEFORE flash-attn so it can compile / pick a wheel.
+pip install -q packaging ninja wheel
+
+# Install torch + transformers + peft stack first (flash-attn needs torch present at build/import).
+pip install -q \
+  "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" \
+  "transformers==4.48.2" "peft==0.10.0" "accelerate==1.2.0" \
+  "numpy==1.26.4" "torchmetrics==1.3.2" \
+  cachetools einops nltk omegaconf PyYAML tqdm scikit-learn pandas
+
+# NOTE: flash-attn is intentionally NOT installed here. Colab's torch/cuda/python combo
+# moves faster than flash-attn's wheel releases. Eval falls back to sdpa attention,
+# which is correct and only ~1.3-1.5x slower at our batch=1 inference workload.
+# To try flash-attn manually: pip install flash-attn --no-build-isolation (slow, may fail).
+python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'gpu', torch.cuda.is_available())"
 
 echo ">>> HuggingFace login..."
 if [[ -n "$HF_TOKEN" ]]; then

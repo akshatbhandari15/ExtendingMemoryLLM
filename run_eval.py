@@ -270,7 +270,7 @@ def run_strategy(strategy, model, tokenizer, args, device):
     accs, per_example = run_retention_eval(model, tokenizer, dataloader, args.nuc, device)
     elapsed = time.time() - t0
 
-    auc = float(np.trapezoid(accs))
+    auc = float(getattr(np, "trapezoid", np.trapz)(accs))
 
     print(f"\n  Step accuracies : {[f'{a:.3f}' for a in accs]}")
     print(f"  AUC             : {auc:.4f}")
@@ -322,7 +322,15 @@ def main():
     strategies = STRATEGIES if args.strategy == "all" else [args.strategy]
 
     print(f"Loading {args.model} ...")
-    model = MemoryLLMWithStrategies.from_pretrained(args.model).to(device).to(dtype)
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+    except ImportError:
+        attn_impl = "sdpa"
+    print(f"Using attn_implementation={attn_impl}")
+    model = MemoryLLMWithStrategies.from_pretrained(
+        args.model, torch_dtype=dtype, attn_implementation=attn_impl,
+    ).to(device)
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:

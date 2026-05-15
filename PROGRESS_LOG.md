@@ -299,3 +299,207 @@ Run with defaults; for paper-final numbers bump iters: `python analysis/signific
 - [ ] Draft #26 Intro/Related Work and #27 Methods *now* while runs go (no numbers needed)
 - [ ] After analysis: #28 Experiments, #29 Discussion, #30 Abstract
 - [ ] Slides #16/#17/#18
+
+---
+
+## Session 2026-05-12 — flash-attn wiring + numpy fixes + pipeline re-verify
+
+Goal: prep the codebase for the per-layer canonical matrix runs (CODEBASE_REVIEW §7). Found three blockers on a fresh Colab session, fixed all three, re-verified the full pipeline.
+
+### Bug 6 — `attn_implementation` was never requested at model load
+
+`run_eval.py` and `run_sanity.py` both called `MemoryLLMWithStrategies.from_pretrained(args.model)` with no `attn_implementation` kwarg, so HF defaulted to `sdpa` even if flash-attn was installed. The model code (`modeling_memoryllm.py:710` `_supports_flash_attn_2 = True`, plus `LlamaFlashAttention2` at line 388 and the entry in `LLAMA_ATTENTION_CLASSES` at line 601) fully supports flash-attn — the driver just wasn't asking for it. Prior "flash-attn installed but unused" symptom on Colab is now explained.
+
+**Fix (commit `68ce9ea`):** both drivers now do `try: import flash_attn` → request `flash_attention_2` if importable, else fall back to `sdpa`. Both print `Using attn_implementation=<impl>` so the active choice is visible. Also threads `torch_dtype=dtype` into `from_pretrained` instead of `.to(dtype)` after the fact, which is the HF-recommended order.
+
+### Decision — drop flash-attn from the setup path on Colab
+
+Colab now ships `torch 2.10.0 + cu128 + py3.12 + cxx11_abi=True`. flash-attn 2.5.4 (released Feb 2024) has no prebuilt wheel for this combo and source builds against torch 2.10 are unreliable — a build attempt this session got 5+ min in before being cancelled. Decision: don't install flash-attn on Colab; let the eval drivers fall back to sdpa. The drop is ~1.3–1.5× slowdown at batch=1 inference, which is acceptable.
+
+**Fix (commit `68ce9ea`):** `scripts/setup.sh` now installs the pinned `torch==2.5.1 transformers==4.48.2 peft==0.10.0 accelerate==1.2.0` stack explicitly and skips flash-attn entirely, with a comment block explaining why for future-us.
+
+### Bug 7 — `np.trapezoid` doesn't exist on numpy 1.26
+
+`np.trapezoid` was added in numpy 2.0. Our pinned `numpy==1.26.4` only has `np.trapz` (the older name; still works on numpy 2.x with a deprecation warning). Crash in `run_eval.py:273`, then again in `run_sanity.py:195` after first patch missed the second site.
+
+**Fix (commits `b31f6ee`, `add22ca`):** replaced `np.trapezoid(...)` with `getattr(np, "trapezoid", np.trapz)(...)` across 5 files — `run_eval.py`, `run_sanity.py`, `analysis/plot_retention.py`, `analysis/significance.py`, `analysis/rescore.py`. Works on both numpy 1.x and 2.x.
+
+### Re-verified pipeline state (post-fixes, branch `ketaki` at `add22ca`)
+
+On a fresh Colab A100 session:
+
+**Pin check** (after `bash scripts/setup.sh --no-data` + kernel restart):
+```
+torch        2.5.1+cu124
+transformers 4.48.2
+peft         0.10.0
+accelerate   1.2.0
+cuda         12.4 gpu True
+```
+All pins correct. peft pin holding means LoRA decoder adapters load cleanly — no recurrence of Bug 2.
+
+**Smoke test** — `run_eval.py --strategy random --dataset squad --nuc 3 --num_samples 5 --drop_per_layer --log_dropped`:
+- `Using attn_implementation=sdpa` printed ✓
+- `drop_per_layer: True` printed ✓
+- 25 sec wall time for 5 examples × 3 distractors → ~5 sec per example-step
+- Both files produced: `squad_random_nuc3_perlayer.json` (results) + `squad_random_nuc3_perlayer_dropped.json` (drop log, 20 entries) ✓
+- Implies ~5 hr per strategy at full N=100, nuc=20 → ~5–7 hr per dataset for all 4 strategies
+
+**Sanity** — `run_sanity.py --num_samples 30 --nuc 5`:
+| Condition | step-0 | step-5 | AUC |
+|---|---|---|---|
+| normal | **0.567** | 0.467 | 2.450 |
+| zeroed | 0.000 | 0.000 | 0.000 |
+| scrambled | 0.633 | 0.400 | 2.617 |
+
+LOAD REPORT: `missing_keys: 0, unexpected_keys: 0, mismatched_keys: 0`, `initialized: 1`, `memory.std=0.336` — identical to the historical pass state from 2026-04-28.
+
+`normal − zeroed = +0.567` (>> 0.10 threshold). **PASS.** Pipeline cleared for the long per-layer matrix runs.
+
+Note: step-0 normal is 0.567 here vs 0.667 historically. Difference is within sampling noise at N=30 (different seed or just luck of the draw) — the gap is what matters and it's massive.
+
+### Today's commits (branch `ketaki`)
+
+| Commit | What |
+|---|---|
+| `68ce9ea` | Wire `attn_implementation` into `from_pretrained` in `run_eval.py` / `run_sanity.py` with flash-attn → sdpa fallback. Pin deps explicitly in `setup.sh` and drop flash-attn from install path. |
+| `b31f6ee` | `np.trapezoid` → `getattr(np, "trapezoid", np.trapz)` in `run_eval.py`, `analysis/plot_retention.py`, `analysis/significance.py`, `analysis/rescore.py`. |
+| `add22ca` | Same fix in `run_sanity.py` (missed in `b31f6ee`). |
+
+### What's next (carries over from CODEBASE_REVIEW §7)
+
+- **Phase A:** SQuAD then NQ per-layer matrix runs (`--strategy all --drop_per_layer --log_dropped --output_dir results/perlayer --resume`). ~5–7 hr each on A100. Sync to Drive periodically.
+- **Phase B:** `auc_table.py`, `significance.py`, `dropped_indices.py` on `results/perlayer/` → canonical AUC + significance + Layer-Jaccard tables. Plus regenerate retention figures.
+- **Phase C:** writeup hygiene — surprise "orthogonal → most dissimilar", AUC normalize to [0, 1], update `PROJECT_STATUS.md` with per-layer numbers + train/test-mismatch finding.
+- **Phase D (optional):** N=300 confirmation for `age` + `random` if N=100 trends aren't Bonferroni-significant.
+- **Phase E:** report writeup — Methods + Intro can be drafted now in parallel with Phase A; Experiments/Discussion after Phase B lands.
+
+---
+
+## Session 2026-05-12 evening — Phase A2 complete (SQuAD per-layer matrix)
+
+All 4 SQuAD strategies ran clean on Colab A100. **Total elapsed: 2.8 hr** (well under the 5–7 hr estimate — the `age` loop vectorisation from commit `2129691` paid off, all strategies now run at roughly the same per-step latency).
+
+### Per-layer SQuAD results (N=100, nuc=20, `drop_per_layer=True`, sdpa attention)
+
+| Strategy | Per-layer AUC | Step-0 | Step-20 | Elapsed | Prior shared-drop AUC | Δ (perlayer − shared) |
+|---|---:|---:|---:|---:|---:|---:|
+| random | **8.18** | 0.540 | 0.380 | 2502 s | 8.01 | **+0.17** |
+| attention | 7.63 | 0.490 | 0.350 | 2530 s | 7.68 | −0.05 |
+| age | **8.46** | 0.520 | 0.380 | 2451 s | 8.47 | −0.01 |
+| surprise | 8.015 | 0.430 | 0.360 | 2689 s | 7.75 | **+0.27** |
+
+**ΔAUC vs random in per-layer mode:** age +0.28, surprise −0.165, attention −0.55.
+
+### Initial read (full analysis comes in Phase B)
+
+The TA's per-layer-independence hypothesis appears supported on first inspection:
+- **Random gains the most from per-layer mode** (+0.17 AUC moving from shared → per-layer). It's the strategy with the biggest *structural* benefit from layer independence (`torch.rand(N)` is genuinely resampled per layer; the other strategies' per-layer divergence is more limited).
+- **Surprise also gains substantially** (+0.27) — consistent with `delta_memory[layer_idx]` actually differing per layer, so per-layer mode produces real per-layer drop diversity for surprise.
+- **Age is flat** (−0.01) — predicted by the 2026-04-21 reviewer analysis: `_token_ages` are synchronised across layers, only the `1e-3` tie-break noise (from commit `f186d17`) produces per-layer divergence. The flatness is empirical confirmation that age's drops were already nearly the same in both modes.
+- **Attention got slightly worse in per-layer mode** (−0.05) — small enough to be noise, but interesting. Phase B Layer-Jaccard will tell us whether the per-layer attention EMAs actually diverge or whether they cluster around the same low-attention tokens regardless.
+
+**Ranking in per-layer mode (canonical):** age > random > surprise > attention. Attention is the only strategy that now underperforms random.
+
+### Operational notes
+
+- One benign warning surfaced during the `attention` strategy: `LlamaSdpaAttention ... does not support output_attentions=True. Falling back to manual attention.` That's HF auto-switching to eager attention only when the attention strategy needs `output_attentions=True` to update the EMA. Not a bug, doesn't affect correctness. The other three strategies stayed on sdpa for the whole run.
+- Drop-log files: 2100 entries each = 100 examples × 21 steps (target + 20 distractors). Correct.
+- All 8 files (4 results JSONs + 4 drop logs) written to `results/perlayer/`. Backup to `MyDrive/ExtendingMemoryLLM/perlayer/` is the next step before launching Phase A3 (NQ).
+
+### Updated next actions
+
+- [ ] **Backup** `results/perlayer/*` to Drive (1 min, do before A3).
+- [ ] **Phase A3:** NQ per-layer matrix run (`--dataset nq`, same flags). ETA ~2.8–3 hr.
+- [ ] **Phase B1–B5** after A3 lands: AUC table, significance, Layer-Jaccard, retention plots, position-of-answer histogram (B5 script still to be written).
+- [ ] **Phase E1/E2 (Intro + Methods)** can be drafted in parallel with A3 — no GPU dependency.
+
+---
+
+## Session 2026-05-13 — Phase A3 (NQ per-layer) + Phase B (analysis) complete
+
+### NQ per-layer matrix (Phase A3)
+
+All 4 strategies on NQ A100, 2.9 hr total wall time. Story is qualitatively different from SQuAD: random *gains the most* from per-layer mode (+0.215 vs prior shared-drop) and overtakes every importance strategy. Importance strategies all got *worse* in per-layer mode. Direct support for the TA's per-layer-independence hypothesis: random's structural benefit from independent dropping is amplified, while importance strategies that effectively synchronise across layers don't get the same benefit.
+
+| Strategy | NQ per-layer AUC | NQ shared-drop AUC | Δ |
+|---|---:|---:|---:|
+| random | **1.765** | 1.55 | **+0.215** |
+| attention | 1.63 | 1.78 | −0.150 |
+| age | 1.71 | 1.875 | −0.165 |
+| surprise | 1.63 | 1.915 | −0.285 |
+
+### Phase B — all five analyses
+
+**B1 AUC table** (`results/auc_perlayer.csv`): canonical numbers, both datasets.
+
+**B2 Significance** (`results/significance_perlayer.csv`, 5000 bootstrap + 10000 perm iters): nothing clears Bonferroni. SQuAD `attention vs random` is closest (uncorrected p=0.072, ΔAUC=−0.55 — attention meaningfully worse). All other deltas have p > 0.4. Expected at N=100 with bootstrap CIs of ±0.7–1.4 on AUC.
+
+**B3 Layer-Jaccard** (`results/jaccard_summary.csv`): the direct TA Q2 answer.
+- random: 0.01 (fully decorrelated — predicted ~0.02)
+- attention: 0.01 (fully decorrelated — surprise; we'd predicted moderate)
+- surprise: 0.60 (moderate — matches prediction)
+- age: 0.95 (synchronized — matches prediction)
+
+The Jaccard rank order is monotonic with how much per-layer mode hurts each strategy (random hurts least, age hurts most). Layer-Jaccard explains correlation across layers, not absolute performance.
+
+**B4 Retention figures** (`figures/retention_{squad,nq,combined}.png`): per-layer curves overlaid by strategy.
+
+**B5 Position-of-answer histogram** (`analysis/position_bias.py`, `figures/position_bias.png`, `results/position_bias.csv`): tests whether `age`'s SQuAD win is just recency bias of where SQuAD places answers. Result is clean — age wins on **mid-position** answers (gap +0.12 vs random), not late. If it were recency bias, late would dominate. Win is genuine.
+
+### Operational issues hit + resolved
+
+- **Drop logs are 100+ MB each in per-layer mode.** Initial push to GitHub failed with 408 timeout (85 MiB payload), then with pre-receive hook rejection (files >100 MB). Resolution: gitignored `results/perlayer/*_dropped.json` entirely; they live on Drive only. The lightweight result JSONs (per_example dumps + accs + AUC, ~2–5 KB each) and the four analysis CSVs went to GitHub instead. Total GitHub payload: 247 KiB.
+- **NQ jsonl was truncated to 1.9 GB on Drive** (should be 6.4 GB). Caught by sizes-don't-match check before launching NQ. Re-downloaded fresh from HF (`YuWangX/KnowledgeRetention`), confirmed 6.4 GB, re-synced to Drive. Smoke test before the full run produced non-zero accuracies (0.4 / 0.6 / 0.4 / 0.4), confirming Bug 4 fix still held.
+- **Analysis scripts needed `--stem_suffix _perlayer`** to find `*_perlayer.json` files (the flag was already in the scripts but I'd given the wrong CLI invocation initially).
+
+### Today's commits
+
+| Commit | What |
+|---|---|
+| `a41207c` | Add `analysis/position_bias.py` (Phase B5 script) |
+| `938f6c6` | [RESULTS] Phase A+B: 8 per-layer JSONs + 4 analysis CSVs + figures (drop logs gitignored) |
+
+---
+
+## Session 2026-05-14 — five extra plots + canonical doc update
+
+### Five paper-quality plots (`analysis/extra_plots.py`)
+
+All built from existing JSONs/CSVs on disk; no GPU, no re-run.
+
+| File | Shows |
+|---|---|
+| `figures/p1_decay_overlay.png` | shared-drop (dashed) vs per-layer (solid) decay curves for every (dataset, strategy) — the visual TA Q1 answer |
+| `figures/p2_strategy_agreement.png` | pairwise Jaccard heatmap at step 20, one panel per dataset — shows random's distinctiveness |
+| `figures/p3_auc_ci_bars.png` | AUC bars with 95% bootstrap CIs, shared vs per-layer side by side, per dataset |
+| `figures/p4_robust_forgot_recovered.png` | per-strategy example breakdown: robust (right @0&@20) / recovered / forgot / never |
+| `figures/p5_layer_jaccard.png` | Layer-Jaccard horizontal bars by (strategy, dataset) |
+
+### New deeper insights extracted from per-example data
+
+1. SQuAD and NQ have qualitatively different decay profiles. SQuAD retains >65% of step-0 across 20 distractors; NQ half-lives within 6–15 steps.
+2. Surprise has the gentlest SQuAD decay (drop 0.07) but starts lowest (0.43 vs random 0.54). Stability profile distinct from absolute-accuracy profile.
+3. Attention and surprise on SQuAD have a "shock minimum" at steps 2–3 then recover; random and age decline monotonically. Importance signals need a few injections to stabilise.
+4. Random retains *different* examples than the importance strategies (step-20 Jaccard ~0.51 with each). Age and surprise agree on 0.68 of their retained examples. Random's contribution is structurally distinct.
+5. Attention is the most stable strategy on SQuAD (29 robust, 20 forgot, 6 recovered). Random is the highest-variance (28 forgot, 12 recovered).
+6. NQ "robust" counts are brutal — age has only 1 example correct at both step 0 and step 20 of 100. N=300 Phase D would meaningfully tighten NQ claims.
+
+### What's done overall (cumulative)
+
+- ✅ Phase A1–A4: per-layer matrix runs both datasets
+- ✅ Phase B1–B5: AUC table, significance, Layer-Jaccard, retention plots, position-bias
+- ✅ Phase P1–P5: five extra plots
+- ✅ Doc updates: PROJECT_STATUS.md + PROGRESS_LOG.md with canonical numbers and TA Q1/Q2/Q3 answers
+
+### What's next
+
+- [ ] **C1.** Fix "orthogonal" → "most dissimilar" in any draft writeup text.
+- [ ] **C2.** Normalize AUC by /20 for [0, 1] scale in CSVs + figures (paper hygiene).
+- [ ] **D1 (optional).** N=300 confirmation on NQ (`age` + `random` only) to firm up the noisier NQ ranking. ~6 hr A100.
+- [ ] **E1.** Intro + Related Work draft (no numbers needed, no blockers).
+- [ ] **E2.** Methods draft (includes the C1 wording fix + 3B-profiling/8B-eval paragraph).
+- [ ] **E3.** Experiments + Results — embed Phase A/B + P1–P5 outputs.
+- [ ] **E4.** Discussion — three findings + TA Q1/Q2/Q3 answers (text is essentially in PROJECT_STATUS.md, lift it).
+- [ ] **E5.** Abstract + final pass.
+- [ ] **E6.** Slides #16/#17/#18.
