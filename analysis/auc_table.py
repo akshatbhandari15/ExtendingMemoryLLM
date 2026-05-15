@@ -38,15 +38,19 @@ def main():
             with open(path) as f:
                 d = json.load(f)
             accs = d["accuracy_per_step"]
+            nuc = d["config"]["nuc"]
+            # AUC normalised to [0, 1] by dividing by the integration width (nuc).
+            # np.trapz over (nuc+1) points with dx=1 gives raw AUC in [0, nuc].
             rows.append({
-                "dataset":     ds,
-                "strategy":    strat,
-                "nuc":         d["config"]["nuc"],
-                "num_samples": d["config"]["num_samples"],
-                "auc":         round(d["auc"], 4),
-                "step_0":      round(accs[0], 4),
-                "step_final":  round(accs[-1], 4),
-                "elapsed_s":   round(d.get("elapsed_seconds", -1), 1),
+                "dataset":      ds,
+                "strategy":     strat,
+                "nuc":          nuc,
+                "num_samples":  d["config"]["num_samples"],
+                "auc":          round(d["auc"], 4),
+                "auc_norm":     round(d["auc"] / nuc, 4),
+                "step_0":       round(accs[0], 4),
+                "step_final":   round(accs[-1], 4),
+                "elapsed_s":    round(d.get("elapsed_seconds", -1), 1),
             })
 
     if not rows:
@@ -55,7 +59,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     fieldnames = ["dataset", "strategy", "nuc", "num_samples",
-                  "auc", "step_0", "step_final", "elapsed_s"]
+                  "auc", "auc_norm", "step_0", "step_final", "elapsed_s"]
     with open(args.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -64,11 +68,11 @@ def main():
     print(f"  -> {args.out}")
 
     # Pretty-print to stdout
-    print("\n  dataset  strategy   nuc   N    AUC   step0  stepN")
-    print("  " + "-" * 52)
+    print("\n  dataset  strategy   nuc   N     AUC    AUC/nuc  step0  stepN")
+    print("  " + "-" * 62)
     for r in rows:
-        print(f"  {r['dataset']:<8} {r['strategy']:<10} {r['nuc']:<5} {r['num_samples']:<4}"
-              f" {r['auc']:<6} {r['step_0']:<6} {r['step_final']}")
+        print(f"  {r['dataset']:<8} {r['strategy']:<10} {r['nuc']:<5} {r['num_samples']:<5}"
+              f" {r['auc']:<6} {r['auc_norm']:<8} {r['step_0']:<6} {r['step_final']}")
 
 
 if __name__ == "__main__":

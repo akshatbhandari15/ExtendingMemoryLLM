@@ -158,7 +158,8 @@ def plot_p2(D, out):
 # ---------------------------------------------------------------------------
 # P3 — AUC bar chart with 95% bootstrap CIs, shared vs per-layer
 # ---------------------------------------------------------------------------
-def plot_p3(D, out, n_iters=2000):
+def plot_p3(D, out, n_iters=2000, normalise=True):
+    """If normalise=True, divide AUC by nuc so y-axis is on [0, 1]."""
     fig, axes = plt.subplots(1, len(DATASETS), figsize=(6 * len(DATASETS), 5))
     rng = np.random.default_rng(0)
     width = 0.36
@@ -167,18 +168,23 @@ def plot_p3(D, out, n_iters=2000):
     for ax, ds in zip(axes, DATASETS):
         shared_aucs, shared_lo, shared_hi = [], [], []
         per_aucs,    per_lo,    per_hi    = [], [], []
+        # use nuc from the first available file to set the normalisation divisor
+        nuc = next((D[m][ds][s]["config"]["nuc"]
+                    for m in ("perlayer", "shared")
+                    for s in STRATEGIES if s in D[m][ds]), 20)
+        scale = nuc if normalise else 1
         for st in STRATEGIES:
             for tag, mode in [("shared", shared_aucs), ("perlayer", per_aucs)]:
                 if st in D[tag][ds]:
                     M = D[tag][ds][st]["_M"]
-                    mode.append(float(trapz(M.mean(0))))
+                    mode.append(float(trapz(M.mean(0))) / scale)
                 else:
                     mode.append(float("nan"))
             for tag, lo, hi in [("shared", shared_lo, shared_hi),
                                 ("perlayer", per_lo, per_hi)]:
                 if st in D[tag][ds]:
                     a, b = bootstrap_auc_ci(D[tag][ds][st]["_M"], n_iters, rng)
-                    lo.append(a); hi.append(b)
+                    lo.append(a / scale); hi.append(b / scale)
                 else:
                     lo.append(float("nan")); hi.append(float("nan"))
         shared_err = [np.array(shared_aucs) - np.array(shared_lo),
@@ -190,11 +196,15 @@ def plot_p3(D, out, n_iters=2000):
         ax.bar(x + width/2, per_aucs, width, yerr=per_err,
                label="per-layer", color="#2ca02c", capsize=4)
         ax.set_xticks(x); ax.set_xticklabels(STRATEGIES)
-        ax.set_title(f"{ds} — AUC (with 95% bootstrap CI)")
-        ax.set_ylabel("AUC")
+        ylab = "AUC / nuc (mean retention)" if normalise else "AUC (raw)"
+        ax.set_title(f"{ds} — {ylab.split(' (')[0]} (95% bootstrap CI)")
+        ax.set_ylabel(ylab)
+        if normalise:
+            ax.set_ylim(0, max(0.55, max(per_hi + shared_hi) * 1.1))
         ax.legend()
         ax.grid(axis="y", alpha=0.3)
-    fig.suptitle("AUC with 95% CIs — shared-drop vs per-layer mode", y=1.02)
+    title = "AUC/nuc (normalised to [0,1])" if normalise else "AUC (raw)"
+    fig.suptitle(f"{title} with 95% CIs — shared-drop vs per-layer mode", y=1.02)
     plt.tight_layout()
     plt.savefig(out, dpi=140, bbox_inches="tight")
     print(f"  wrote {out}")
