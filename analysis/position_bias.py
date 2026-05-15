@@ -197,26 +197,33 @@ def main():
     # Plot — one subplot per dataset, grouped bars over strategies
     datasets = sorted({r["dataset"] for r in rows})
     strategies = sorted({r["strategy"] for r in rows})
+    # No sharey — NQ accuracies are near floor (5-15%); forcing same scale as
+    # SQuAD (where accuracies hit 50%) makes the NQ panel look dead.
     fig, axes = plt.subplots(1, len(datasets), figsize=(6 * len(datasets), 4.5),
-                             sharey=True, squeeze=False)
+                             squeeze=False)
     width = 0.8 / max(len(strategies), 1)
     x = np.arange(args.bins)
 
     for ax, ds in zip(axes[0], datasets):
+        max_y = 0.0
         for si, strat in enumerate(strategies):
             ys = []
             for b in range(args.bins):
                 ms = [r for r in rows if r["dataset"] == ds
                                        and r["strategy"] == strat
                                        and r["bin"] == bin_labels[b]]
-                ys.append(ms[0]["accuracy"] if ms else float("nan"))
+                v = ms[0]["accuracy"] if ms else float("nan")
+                ys.append(v)
+                if not np.isnan(v):
+                    max_y = max(max_y, v)
             ax.bar(x + (si - len(strategies)/2 + 0.5) * width, ys, width, label=strat)
         ax.set_title(f"{ds} — step {args.step} accuracy by answer position")
         ax.set_xticks(x)
         ax.set_xticklabels(bin_labels[:args.bins])
         ax.set_xlabel("Answer position in context")
         ax.set_ylabel("Accuracy")
-        ax.set_ylim(0, 1)
+        # auto y-axis with a bit of headroom; small datasets get zoomed
+        ax.set_ylim(0, max(max_y * 1.25, 0.05))
         ax.legend()
         ax.grid(axis="y", alpha=0.3)
 
