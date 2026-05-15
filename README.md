@@ -6,15 +6,6 @@ This is a research fork of [MemoryLLM](https://arxiv.org/abs/2402.04624) (Wang e
 
 **TL;DR:** at the per-layer-independent dropping condition the checkpoint was actually trained under, random is a surprisingly strong baseline. Age beats it on SQuAD, mainly on mid-position answers (not recency bias). Layer-Jaccard confirms why: age drops the same tokens across all 32 layers (≈0.95), while random fully decorrelates (≈0.01) — that structural independence is most of what gives random its edge.
 
----
-
-## Authors
-
-- **Ketaki Dabade** ([@ketakiii3](https://github.com/ketakiii3))
-- **Akshat Bhandari** ([@akshatbhandari15](https://github.com/akshatbhandari15))
-- **Tushar Tomar**
-
-Course project for Columbia University COMS 6998 — Continual Learning and Memory Models, Spring 2026.
 
 ## Credits & relationship to upstream
 
@@ -77,7 +68,7 @@ Full numbers: `results/{auc_perlayer,significance_perlayer,jaccard_summary,posit
 ### 1. Clone the `ketaki` branch (active development; `main` mirrors it)
 
 ```bash
-git clone -b ketaki https://github.com/akshatbhandari15/ExtendingMemoryLLM.git
+git clone https://github.com/akshatbhandari15/ExtendingMemoryLLM.git
 cd ExtendingMemoryLLM
 ```
 
