@@ -1,118 +1,209 @@
 # Beyond Random Forgetting: Importance-Aware Memory Management for MemoryLLM
 
-**COMS 6998 — Continual Learning and Memory Models, Columbia University**
+**COMS 6998 — Continual Learning and Memory Models, Columbia University (Spring 2026)**
 
-This fork extends [MemoryLLM](https://arxiv.org/abs/2402.04624) with importance-aware dropping strategies. Instead of evicting memory tokens at random, we compare four principled strategies: attention-based, age-stratified, surprise-gated, and Fisher-inspired dropping.
+This is a research fork of [MemoryLLM](https://arxiv.org/abs/2402.04624) (Wang et al., ICML 2024). The original paper augments Llama-3-8B with a 1.67 B-parameter memory pool (32 layers × 50 blocks × 256 tokens × 4096 dim) and drops memory tokens **at random** when new context arrives. We replace that policy with **four importance-aware drop strategies** and ask: do principled eviction signals retain knowledge better than random?
 
-## Quick Start: Running Strategy Experiments on Google Colab
+**TL;DR:** at the per-layer-independent dropping condition the checkpoint was actually trained under, random is a surprisingly strong baseline. Age beats it on SQuAD, mainly on mid-position answers (not recency bias). Layer-Jaccard confirms why: age drops the same tokens across all 32 layers (≈0.95), while random fully decorrelates (≈0.01) — that structural independence is most of what gives random its edge.
 
-### 1. Setup
+---
+
+## Authors
+
+- **Ketaki Dabade** ([@ketakiii3](https://github.com/ketakiii3))
+- **Akshat Bhandari** ([@akshatbhandari15](https://github.com/akshatbhandari15))
+- **Tushar Tomar**
+
+Course project for Columbia University COMS 6998 — Continual Learning and Memory Models, Spring 2026.
+
+## Credits & relationship to upstream
+
+This fork builds directly on the official MemoryLLM implementation by Yu Wang et al. The model code (`modeling_memoryllm.py`, `modeling_mplus.py`, `configuration_memoryllm.py`, dataset loaders, the LongBench eval, and the pretrained `YuWangX/memoryllm-8b` checkpoint) is unchanged or minimally patched from upstream. The original MemoryLLM README is preserved below for completeness, with full citations at the bottom of this file. All credit for the base architecture, training, and pretrained weights belongs to the original authors.
+
+What this fork adds:
+- `modeling_memoryllm_strategies.py` — `MemoryLLMWithStrategies` subclass that overrides `drop_memory()` with four importance-aware policies.
+- `run_eval.py`, `run_sanity.py` — retention eval driver + pre-eval health check.
+- `analysis/` — AUC table, bootstrap CIs + permutation tests, Layer-Jaccard, retention plots, position-of-answer bias, plus five extra paper-quality plots.
+- `CODEBASE_REVIEW.md`, `PROGRESS_LOG.md`, `PROJECT_STATUS.md`, `EXPERIMENTS.md` — full project documentation.
+
+---
+
+## Headline results (per-layer mode, N=100 examples, 20 distractor steps)
+
+| Strategy | SQuAD AUC | SQuAD vs random | NQ AUC | NQ vs random |
+|---|---:|---:|---:|---:|
+| random | 8.18 | — | **1.765** | — |
+| attention | 7.63 | −0.55 (p=0.072) | 1.63 | −0.135 (ns) |
+| **age** | **8.46** | +0.28 (ns) | 1.71 | −0.055 (ns) |
+| surprise | 8.015 | −0.165 (ns) | 1.63 | −0.135 (ns) |
+
+AUC is `np.trapz(accuracy_per_step)` over 21 points; normalised values (AUC / nuc, on [0, 1]) are in `results/auc_perlayer.csv`. No comparison clears Bonferroni at N=100 — trends are descriptive, not confirmatory. Layer-Jaccard numbers (TA Q2):
+
+- random: **0.01** (drops fully decorrelated across layers)
+- attention: **0.01** (per-layer attention EMAs diverge sharply too)
+- surprise: **0.60** (per-layer `delta_memory` partially correlated)
+- age: **0.95** (ages are synchronised; tie-break noise barely diversifies)
+
+Full numbers: `results/{auc_perlayer,significance_perlayer,jaccard_summary,position_bias}.csv`. Figures: `figures/p1_decay_overlay.png`, `p2_strategy_agreement.png`, `p3_auc_ci_bars.png`, `p4_robust_forgot_recovered.png`, `p5_layer_jaccard.png`, `position_bias.png`, `retention_{squad,nq,combined}.png`.
+
+---
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `modeling_memoryllm.py` | Upstream MemoryLLM model (lightly patched to surface peft load errors loudly). |
+| `modeling_memoryllm_strategies.py` | **Our contribution.** `MemoryLLMWithStrategies(MemoryLLM)` with four drop strategies + drop logging. |
+| `modeling_mplus.py`, `configuration_memoryllm.py` | Upstream, unchanged in essentials. |
+| `run_eval.py` | Retention eval driver. Auto-detects flash-attn else falls back to sdpa; supports `--drop_per_layer` and `--log_dropped`. |
+| `run_sanity.py` | E0 health check — `normal` vs `zeroed` vs `scrambled` memory. Must pass before long runs. |
+| `dataset/squad.py`, `dataset/nq.py` | Loaders, patched to use `AutoTokenizer` and fall back to dev-only distractor contexts when train files are absent. |
+| `analysis/auc_table.py` | Builds `results/auc_*.csv` with raw + normalised AUC. |
+| `analysis/significance.py` | Bootstrap 95% CIs + paired permutation tests vs `random`, Bonferroni-corrected. |
+| `analysis/dropped_indices.py` | Layer-Jaccard (within-strategy cross-layer overlap) + cross-strategy Jaccard. |
+| `analysis/plot_retention.py` | Retention decay curves with bootstrap CI bands. |
+| `analysis/position_bias.py` | Step-N accuracy by where the gold answer sits in the source context. |
+| `analysis/extra_plots.py` | Five paper-quality plots (P1–P5). |
+| `scripts/setup.sh` | Pins `torch 2.5.1 / transformers 4.48.2 / peft 0.10.0 / accelerate 1.2.0`. **Do not drift these pins** (see `PROGRESS_LOG.md` Bug 2). |
+| `EXPERIMENTS.md` | Command reference. |
+| `CODEBASE_REVIEW.md` | Full repo audit + plan-of-record. |
+| `PROGRESS_LOG.md` | Chronological debugging log incl. the four-bug session and per-layer matrix runs. |
+| `PROJECT_STATUS.md` | Current headline numbers + Phase checklist. |
+
+---
+
+## Quick start
+
+### 1. Clone the `ketaki` branch (active development; `main` mirrors it)
+
 ```bash
-# Clone and install
-git clone https://github.com/wangyu-ustc/MemoryLLM.git
-cd MemoryLLM
-pip install -r requirements_infer_only.txt
-huggingface-cli login
+git clone -b ketaki https://github.com/akshatbhandari15/ExtendingMemoryLLM.git
+cd ExtendingMemoryLLM
 ```
 
-### 2. Copy strategy files into the repo
-Place these two files in the MemoryLLM root directory:
-- `modeling_memoryllm_strategies.py` — extends MemoryLLM with four dropping strategies
-- `test_training_colab.py` — evaluation and profiling script
+### 2. Install (Colab A100 recommended)
 
-### 3. Download evaluation data
+```bash
+export HF_TOKEN=hf_xxx           # for YuWangX/memoryllm-8b access
+bash scripts/setup.sh --no-data  # installs pinned deps
+# Then RESTART the Python kernel so the pins take effect.
+```
+
+Verify after restart:
+```bash
+python -c "import torch, transformers, peft, accelerate; \
+print(torch.__version__, transformers.__version__, peft.__version__, accelerate.__version__)"
+```
+Must print `2.5.1+cu124 4.48.2 0.10.0 1.2.0`. If any drift, **stop** — the LoRA decoder adapters silently fail to load under `peft 0.19+`.
+
+### 3. Download data
+
 ```bash
 mkdir -p data/squad data/nq
-
-# SQuAD v2.0
-wget https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json -P data/squad/
-wget https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v2.0.json -P data/squad/
-
-# NaturalQA: download from https://ai.google.com/research/NaturalQuestions/download
-# Place v1.0-simplified_nq-dev-all.jsonl in data/nq/
-
-# Index files (from HuggingFace dataset: YuWangX/KnowledgeRetention)
-# Place indices_squad_3.npy in data/squad/ and indices_nq_4.npy in data/nq/
+wget -q https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json -O data/squad/dev-v2.0.json
+python -c "
+from huggingface_hub import hf_hub_download; import shutil
+for fn in ['squad/indices_squad_3.npy','nq/indices_nq_4.npy','nq/v1.0-simplified_nq-dev-all.jsonl']:
+    p = hf_hub_download('YuWangX/KnowledgeRetention', fn, repo_type='dataset')
+    shutil.copy(p, 'data/' + fn)
+"
 ```
+NQ jsonl is 6.4 GB — allow time.
 
-### 4. Run experiments
+### 4. Sanity (always before long evals)
 
-The script supports two modes: initializing MemoryLLM from a **base LLM** (fresh memory, for training/profiling) or loading a **pretrained MemoryLLM checkpoint** (for evaluation).
-
-#### Option A: Base 3B model (fresh memory pool — use this for compute profiling)
 ```bash
-# Smoke test with OpenLlama 3B (no datasets needed, no gated access)
-python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 --smoke-test
-
-# Smoke test with Llama 3.2 3B (requires HF login + license acceptance)
-python test_training_colab.py --base-model meta-llama/Llama-3.2-3B --smoke-test
-
-# GPU memory profiling only
-python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 --profile-only
-
-# Adjust memory pool size (default: 4 blocks x 256 tokens)
-python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 \
-    --num-blocks 10 --num-tokens 256 --smoke-test
-
-# Full strategy comparison on SQuAD
-python test_training_colab.py --base-model openlm-research/open_llama_3b_v2 \
-    --strategies random attention age surprise \
-    --datasets squad --nuc 5 --num-samples 50
+python run_sanity.py --num_samples 30 --nuc 5
 ```
+Pass condition: `normal − zeroed > 0.10`. Historical pass values: +0.633 (Apr), +0.567 (May).
 
-#### Option B: Pretrained MemoryLLM-8B checkpoint (for evaluating strategies on a trained model)
+### 5. Smoke test the per-layer flag
+
 ```bash
-# Smoke test with pretrained 8B
-python test_training_colab.py --pretrained YuWangX/memoryllm-8b --smoke-test
+python run_eval.py --strategy random --dataset squad --nuc 3 --num_samples 5 \
+    --drop_per_layer --log_dropped --output_dir results/perlayer_smoke
+```
+~2 min. Produces a results JSON + a `*_dropped.json` companion (the layer-by-layer drop log).
 
-# Full comparison on both datasets
-python test_training_colab.py --pretrained YuWangX/memoryllm-8b \
-    --strategies random attention age surprise \
-    --datasets squad naturalqa --nuc 10 --num-samples 100
+### 6. Canonical per-layer matrix run (the headline experiment)
+
+```bash
+# SQuAD: ~5-7 hr on A100
+python run_eval.py --strategy all --dataset squad --nuc 20 --num_samples 100 \
+    --drop_per_layer --log_dropped --output_dir results/perlayer --resume
+
+# NQ: ~5-7 hr on A100
+python run_eval.py --strategy all --dataset nq --nuc 20 --num_samples 100 \
+    --drop_per_layer --log_dropped --output_dir results/perlayer --resume
 ```
 
-> **Note:** With `--base-model` and a fresh (untrained) memory pool, QA accuracy will be near zero — the model hasn't learned to use its memory yet. Use this mode for compute/memory profiling. For meaningful accuracy numbers, use `--pretrained` with a trained checkpoint.
+`--resume` skips strategies whose output JSON already exists, so reruns are safe across Colab disconnects. The `_dropped.json` files are ~100 MB each (per-layer mode); they're gitignored — keep them on Google Drive or rerun to regenerate.
 
-### 5. Using strategies in your own code
+### 7. Analysis (no GPU, ~30 min)
+
+```bash
+python analysis/auc_table.py     --results_dir results/perlayer --stem_suffix _perlayer --out results/auc_perlayer.csv
+python analysis/significance.py  --results_dir results/perlayer --stem_suffix _perlayer --out results/significance_perlayer.csv \
+                                 --bootstrap_iters 5000 --perm_iters 10000
+python analysis/dropped_indices.py --results_dir results/perlayer --out results/jaccard_summary.csv
+python analysis/plot_retention.py  --results_dir results/perlayer --figures_dir figures
+python analysis/position_bias.py
+python analysis/extra_plots.py
+```
+
+---
+
+## Strategies
+
+| Strategy | What it drops | Signal | Per-layer behaviour (Layer-Jaccard) |
+|---|---|---|:---:|
+| `random` | Uniform random (baseline) | none | 0.01 (fully decorrelated) |
+| `attention` | Lowest accumulated attention (EMA, α=0.9) | relevance | 0.01 (per-layer EMAs diverge sharply) |
+| `age` | Oldest tokens; protects last 256 (one full block) | recency | 0.95 (ages synchronised across layers) |
+| `surprise` | Most similar to incoming `delta_memory` (i.e. most redundant) | redundancy | 0.60 (partially correlated) |
+| `fisher` | Implemented but not run (KL-divergence on masked memory; agreed to skip) | output sensitivity | — |
+
+Reference: `modeling_memoryllm_strategies.py:_compute_importance`. Surprise drops the **most similar** tokens to the incoming context (interpretation: drop the redundant ones), not "orthogonal" tokens — a wording bug noted in the earlier code review.
+
+---
+
+## Programmatic use
+
 ```python
 import torch
 from modeling_memoryllm_strategies import MemoryLLMWithStrategies
 from transformers import AutoTokenizer
 
-# Option A: From a base model (fresh memory)
-from test_training_colab import load_model_from_base
-model, tokenizer = load_model_from_base(
-    "openlm-research/open_llama_3b_v2",
-    num_blocks=4, num_tokens=256)
-model = model.cuda()
+# Auto-detect flash-attn; falls back to sdpa if absent (Colab default).
+try:
+    import flash_attn; attn = "flash_attention_2"
+except ImportError:
+    attn = "sdpa"
 
-# Option B: From pretrained checkpoint
-# model = MemoryLLMWithStrategies.from_pretrained(
-#     "YuWangX/memoryllm-8b", torch_dtype=torch.bfloat16)
-# tokenizer = AutoTokenizer.from_pretrained("YuWangX/memoryllm-8b")
-# model = model.cuda()
+model = MemoryLLMWithStrategies.from_pretrained(
+    "YuWangX/memoryllm-8b", torch_dtype=torch.bfloat16, attn_implementation=attn,
+).cuda().eval()
+tokenizer = AutoTokenizer.from_pretrained("YuWangX/memoryllm-8b")
 
-# Switch strategy (options: random, attention, age, surprise, fisher)
-model.set_drop_strategy("attention")
+# Pick a strategy and per-layer mode (the checkpoint was trained at True).
+model.set_drop_strategy("age")
+model.drop_memory_per_layer = True
 
-# Use exactly like MemoryLLM — inject_memory and generate work the same way
 ctx = "The capital of France is Paris."
 model.inject_memory(
-    tokenizer(ctx, return_tensors='pt', add_special_tokens=False).input_ids.cuda(),
-    update_memory=True)
+    tokenizer(ctx, return_tensors="pt", add_special_tokens=False).input_ids.cuda(),
+    update_memory=True,
+)
 ```
 
-### Available Strategies
+---
 
-| Strategy | What it drops | Signal |
-|----------|--------------|--------|
-| `random` | Uniform random (baseline) | None |
-| `attention` | Tokens with lowest accumulated attention (EMA) | Relevance |
-| `age` | Older tokens preferentially, protecting recent injections | Recency |
-| `surprise` | Tokens most similar to incoming knowledge (redundant) | Redundancy |
-| `fisher` | Tokens whose removal least affects output distribution | Output sensitivity |
+## Documentation
 
-Results are saved to `results/strategy_comparison/comparison_results.json`.
+- **`EXPERIMENTS.md`** — runnable command reference and all flags.
+- **`CODEBASE_REVIEW.md`** — full repo map, known inconsistencies, ordered plan.
+- **`PROGRESS_LOG.md`** — chronological debugging log (read "Debug session 2026-04-28" and "Session 2026-05-12" entries for context on the four-bug fix and per-layer matrix runs).
+- **`PROJECT_STATUS.md`** — canonical numbers + Phase checklist.
 
 ---
 
